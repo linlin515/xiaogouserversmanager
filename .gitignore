@@ -1,0 +1,29 @@
+# Gradle & Android build artifacts
+.gradle/
+.kotlin/
+build/
+*/build/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Signing secrets (keep .env.example, never commit .env or keystores)
+.env
+*.jks
+*.keystore
+
+# IDE, Agent & OS
+.idea/
+.zcode/
+*.iml
+.DS_Store
+captures/
+.cxx/
+
+# Python Agent
+__pycache__/
+*.py[cod]
+*.db
+.venv/
