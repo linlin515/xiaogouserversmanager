@@ -49,10 +49,13 @@ class UiComponentsTest {
     }
 
     @Test
-    fun dashboardShowsMultiServerCardsAndErrorBanner() {
+    fun dashboardShowsSearchPinnedBadgeAndErrorBanner() {
         val sampleServers = listOf(
             ServerUiModel(
-                config = ServerConfig("1", "prod-api-01", "生产集群", "10.0.0.1", CollectionMode.HYBRID),
+                config = ServerConfig(
+                    id = "1", name = "prod-api-01", groupName = "生产集群", host = "10.0.0.1",
+                    collectionMode = CollectionMode.HYBRID, isPinned = true
+                ),
                 status = ServerStatus.CRITICAL,
                 snapshot = ServerSnapshot(
                     serverId = "1",
@@ -94,6 +97,7 @@ class UiComponentsTest {
                 )
             }
         }
+        composeRule.onNodeWithText("搜索节点名称 / IP / 分组...").assertIsDisplayed()
         composeRule.onNodeWithText("prod-api-01").assertIsDisplayed()
         composeRule.onNodeWithText("edge-hk-01").assertIsDisplayed()
         composeRule.onNodeWithText("严重告警").assertIsDisplayed()
@@ -118,7 +122,7 @@ class UiComponentsTest {
     }
 
     @Test
-    fun serverDetailWorkloadsShowsRestartConfirmDialog() {
+    fun serverDetailWorkloadsShowsStopAndRestartControls() {
         val model = ServerUiModel(
             config = ServerConfig("1", "prod-api-01", "生产集群", "10.0.0.1", CollectionMode.HYBRID),
             status = ServerStatus.ONLINE,
@@ -131,7 +135,7 @@ class UiComponentsTest {
                 memTotalBytes = 1000L,
                 memUsedBytes = 400L,
                 containers = listOf(
-                    ContainerInfo("abc", "api-gateway", "nginx:1.27", "running", "Up 2d")
+                    ContainerInfo("abc", "api-gateway", "nginx:1.27", "running", "Up 2d", "0.0.0.0:443->443/tcp")
                 )
             ),
             sparklineCpu = listOf(30.0, 32.0),
@@ -146,9 +150,10 @@ class UiComponentsTest {
                     opsState = DetailOpsState(),
                     onRefreshServer = {},
                     onChangeHistoryRange = { _, _ -> },
-                    onOpenLogs = { _, _, _ -> },
+                    onOpenLogs = { _, _, _, _ -> },
+                    onRefreshLogs = {},
                     onCloseLogs = {},
-                    onRestartTarget = { _, _, _ -> },
+                    onPerformWorkloadAction = { _, _, _, _ -> },
                     onRunDiagnostic = { _, _ -> },
                     onEditServer = {},
                     onDeleteServer = {}
@@ -157,7 +162,8 @@ class UiComponentsTest {
         }
         composeRule.onNodeWithText("容器与服务").performClick()
         composeRule.onNodeWithText("api-gateway").assertIsDisplayed()
-        composeRule.onNodeWithText("重启").performClick()
-        composeRule.onNodeWithText("确认重启目标？").assertIsDisplayed()
+        composeRule.onNodeWithText("端口: 0.0.0.0:443->443/tcp").assertIsDisplayed()
+        composeRule.onNodeWithText("停止").performClick()
+        composeRule.onNodeWithText("确认停止目标？").assertIsDisplayed()
     }
 }

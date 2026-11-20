@@ -33,6 +33,12 @@ enum class LogTargetType {
     SYSTEM_JOURNAL
 }
 
+enum class WorkloadAction(val apiValue: String, val label: String) {
+    START("start", "启动"),
+    STOP("stop", "停止"),
+    RESTART("restart", "重启")
+}
+
 enum class AlertMetricType {
     CPU,
     MEMORY,

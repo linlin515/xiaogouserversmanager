@@ -500,17 +500,17 @@ def make_handler(collector: AgentCollector, store: MetricsStore, token: str, ena
             action = data.get("action", "")
             target_type = data.get("targetType", "")
             target_name = data.get("targetName", "")
-            if action != "restart" or not SAFE_TARGET_RE.match(target_name):
+            if action not in ("start", "stop", "restart") or not SAFE_TARGET_RE.match(target_name):
                 self._send_json(400, {"ok": False, "message": "不支持的动作或非法目标名"})
                 return
             if target_type == "docker":
-                rc, out = run_cmd(["docker", "restart", target_name], timeout=20.0)
+                rc, out = run_cmd(["docker", action, target_name], timeout=20.0)
             elif target_type == "systemd":
-                rc, out = run_cmd(["systemctl", "restart", target_name], timeout=20.0)
+                rc, out = run_cmd(["systemctl", action, target_name], timeout=20.0)
             else:
                 self._send_json(400, {"ok": False, "message": "未知目标类型"})
                 return
-            self._send_json(200 if rc == 0 else 500, {"ok": rc == 0, "message": out.strip() or f"已重启 {target_name}"})
+            self._send_json(200 if rc == 0 else 500, {"ok": rc == 0, "message": out.strip() or f"已执行 {action} {target_name}"})
 
     return Handler
 

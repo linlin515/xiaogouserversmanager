@@ -1,5 +1,6 @@
 package com.xiaogou.serverseyes.ui.screens
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -11,16 +12,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -28,8 +36,10 @@ import com.xiaogou.serverseyes.core.designsystem.components.AppCard
 import com.xiaogou.serverseyes.core.designsystem.components.SecondaryButton
 import com.xiaogou.serverseyes.core.designsystem.components.SectionHeader
 import com.xiaogou.serverseyes.core.designsystem.patterns.EmptyState
+import com.xiaogou.serverseyes.core.designsystem.primitives.AppDivider
 import com.xiaogou.serverseyes.core.designsystem.primitives.StatusChipRaw
 import com.xiaogou.serverseyes.core.designsystem.theme.AppTheme
+import com.xiaogou.serverseyes.core.designsystem.tokens.AppRadius
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppSpacing
 import com.xiaogou.serverseyes.core.designsystem.tokens.tabular
 import com.xiaogou.serverseyes.core.model.AlertEvent
@@ -37,22 +47,33 @@ import com.xiaogou.serverseyes.core.model.AlertMetricType
 import com.xiaogou.serverseyes.core.model.AlertRule
 import com.xiaogou.serverseyes.core.model.AlertSeverity
 import com.xiaogou.serverseyes.core.util.Formatters
+import com.xiaogou.serverseyes.data.repository.ServerUiModel
+import java.util.UUID
 import kotlin.math.roundToInt
 
 @Composable
 fun AlertsScreen(
     rules: List<AlertRule>,
     events: List<AlertEvent>,
+    servers: List<ServerUiModel>,
     hasNotificationPermission: Boolean,
     onRequestNotificationPermission: () -> Unit,
     onUpdateRule: (AlertRule) -> Unit,
+    onDeleteRule: (String) -> Unit = {},
     onAcknowledge: (String) -> Unit,
     onAcknowledgeAll: () -> Unit,
     onClearAll: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = AppTheme.colors
-    val globalRules = rules.filter { it.serverId == null }
+    var selectedScopeId by remember { mutableStateOf<String?>(null) } // null = global
+
+    val currentScopeRules = remember(rules, selectedScopeId) {
+        AlertMetricType.entries.associateWith { type ->
+            rules.firstOrNull { it.serverId == selectedScopeId && it.metricType == type }
+                ?: rules.firstOrNull { it.serverId == null && it.metricType == type }
+        }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -92,10 +113,11 @@ fun AlertsScreen(
             }
         }
 
+        // Scope picker
         item {
             AppCard(modifier = Modifier.fillMaxWidth()) {
                 SectionHeader(
-                    title = "全局默认告警阈值",
+                    title = "告警规则作用域",
                     trailing = {
                         StatusChipRaw(
                             text = if (hasNotificationPermission) "通知已开启" else "仅应用内记录",
@@ -105,53 +127,199 @@ fun AlertsScreen(
                         )
                     }
                 )
-                Spacer(Modifier.height(AppSpacing.space3))
+                Spacer(Modifier.height(AppSpacing.space2))
 
-                globalRules.forEach { rule ->
-                    val label = when (rule.metricType) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val isGlobal = selectedScopeId == null
+                    Surface(
+                        onClick = { selectedScopeId = null },
+                        shape = RoundedCornerShape(AppRadius.full),
+                        color = if (isGlobal) colors.infoSoft else colors.surfaceSubtle,
+                        border = if (isGlobal) androidx.compose.foundation.BorderStroke(1.dp, colors.actionPrimary) else null
+                    ) {
+                        Text(
+                            text = "全局默认规则",
+                            style = AppTheme.typography.labelSmall,
+                            color = if (isGlobal) colors.actionPrimary else colors.textSecondary,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+
+                    servers.forEach { srv ->
+                        val active = selectedScopeId == srv.config.id
+                        val hasOverride = rules.any { it.serverId == srv.config.id }
+                        Surface(
+                            onClick = { selectedScopeId = srv.config.id },
+                            shape = RoundedCornerShape(AppRadius.full),
+                            color = if (active) colors.infoSoft else colors.surfaceSubtle,
+                            border = if (active) androidx.compose.foundation.BorderStroke(1.dp, colors.actionPrimary) else null
+                        ) {
+                            Text(
+                                text = "${srv.config.name}${if (hasOverride) " (覆盖)" else ""}",
+                                style = AppTheme.typography.labelSmall,
+                                color = if (active) colors.actionPrimary else colors.textSecondary,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(AppSpacing.space2))
+                Text(
+                    text = if (selectedScopeId == null) {
+                        "全局默认阈值：应用于所有未单独配置告警规则的服务器。"
+                    } else {
+                        val sName = servers.firstOrNull { it.config.id == selectedScopeId }?.config?.name ?: ""
+                        "正在配置 $sName 的独立告警规则（仅作用于该节点）。"
+                    },
+                    style = AppTheme.typography.bodySmall,
+                    color = colors.textSecondary
+                )
+
+                AppDivider(Modifier.padding(vertical = AppSpacing.space2))
+
+                AlertMetricType.entries.forEach { metricType ->
+                    val rule = currentScopeRules[metricType]
+                    val isOverridden = rule?.serverId == selectedScopeId && selectedScopeId != null
+                    val label = when (metricType) {
                         AlertMetricType.CPU -> "CPU 使用率"
                         AlertMetricType.MEMORY -> "内存使用率"
                         AlertMetricType.DISK -> "磁盘使用率"
                         AlertMetricType.OFFLINE -> "连续离线次数"
                     }
-                    val isOffline = rule.metricType == AlertMetricType.OFFLINE
-                    Column(modifier = Modifier.padding(vertical = 6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(label, style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                    val isOffline = metricType == AlertMetricType.OFFLINE
+
+                    if (rule != null) {
+                        Column(modifier = Modifier.padding(vertical = 6.dp)) {
                             Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                val unit = if (isOffline) "次" else "%"
-                                Text(
-                                    text = "警告 ${rule.warningThreshold.roundToInt()}$unit / 严重 ${rule.criticalThreshold.roundToInt()}$unit",
-                                    style = AppTheme.typography.bodySmall.tabular(),
-                                    color = colors.textSecondary
-                                )
-                                Switch(
-                                    checked = rule.enabled,
-                                    onCheckedChange = { onUpdateRule(rule.copy(enabled = it)) }
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(label, style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                                    if (isOverridden) {
+                                        StatusChipRaw(
+                                            text = "独立配置",
+                                            icon = null,
+                                            backgroundColor = colors.infoSoft,
+                                            contentColor = colors.actionPrimary
+                                        )
+                                    }
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                                ) {
+                                    val unit = if (isOffline) "次" else "%"
+                                    Text(
+                                        text = "警告 ${rule.warningThreshold.roundToInt()}$unit / 严重 ${rule.criticalThreshold.roundToInt()}$unit",
+                                        style = AppTheme.typography.bodySmall.tabular(),
+                                        color = colors.textSecondary
+                                    )
+                                    Switch(
+                                        checked = rule.enabled,
+                                        onCheckedChange = { onUpdateRule(rule.copy(enabled = it)) }
+                                    )
+                                }
                             }
-                        }
-                        if (rule.enabled && !isOffline) {
-                            Slider(
-                                value = rule.warningThreshold.toFloat(),
-                                onValueChange = { newWarn ->
-                                    val w = newWarn.roundToInt().toDouble()
-                                    val c = rule.criticalThreshold.coerceAtLeast(w + 5.0).coerceAtMost(99.0)
-                                    onUpdateRule(rule.copy(warningThreshold = w, criticalThreshold = c))
-                                },
-                                valueRange = 50f..95f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = colors.actionPrimary,
-                                    activeTrackColor = colors.actionPrimary
+
+                            if (rule.enabled) {
+                                if (!isOffline) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("警告阈值 (50% ~ 95%)", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                        Text("${rule.warningThreshold.roundToInt()}%", style = AppTheme.typography.labelSmall.tabular(), color = colors.warning)
+                                    }
+                                    Slider(
+                                        value = rule.warningThreshold.toFloat(),
+                                        onValueChange = { newWarn ->
+                                            val w = newWarn.roundToInt().toDouble()
+                                            val c = rule.criticalThreshold.coerceAtLeast(w + 5.0).coerceAtMost(99.0)
+                                            val updated = if (isOverridden || selectedScopeId == null) {
+                                                rule.copy(warningThreshold = w, criticalThreshold = c)
+                                            } else {
+                                                rule.copy(id = UUID.randomUUID().toString(), serverId = selectedScopeId, warningThreshold = w, criticalThreshold = c)
+                                            }
+                                            onUpdateRule(updated)
+                                        },
+                                        valueRange = 50f..95f,
+                                        colors = SliderDefaults.colors(thumbColor = colors.actionPrimary, activeTrackColor = colors.actionPrimary)
+                                    )
+                                } else {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("连续失败次数警告", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            listOf(1, 2, 3, 5).forEach { cnt ->
+                                                val active = rule.warningThreshold.toInt() == cnt
+                                                Surface(
+                                                    onClick = {
+                                                        val updated = if (isOverridden || selectedScopeId == null) {
+                                                            rule.copy(warningThreshold = cnt.toDouble(), criticalThreshold = (cnt + 1).toDouble())
+                                                        } else {
+                                                            rule.copy(id = UUID.randomUUID().toString(), serverId = selectedScopeId, warningThreshold = cnt.toDouble(), criticalThreshold = (cnt + 1).toDouble())
+                                                        }
+                                                        onUpdateRule(updated)
+                                                    },
+                                                    shape = RoundedCornerShape(AppRadius.sm),
+                                                    color = if (active) colors.infoSoft else colors.surfaceSubtle
+                                                ) {
+                                                    Text(
+                                                        text = "${cnt}次",
+                                                        style = AppTheme.typography.labelSmall,
+                                                        color = if (active) colors.actionPrimary else colors.textSecondary,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("告警冷却时间", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                    Text("${rule.cooldownMinutes}分钟", style = AppTheme.typography.labelSmall.tabular(), color = colors.textPrimary)
+                                }
+                                Slider(
+                                    value = rule.cooldownMinutes.toFloat(),
+                                    onValueChange = { mins ->
+                                        val m = mins.roundToInt().coerceIn(1, 60)
+                                        val updated = if (isOverridden || selectedScopeId == null) {
+                                            rule.copy(cooldownMinutes = m)
+                                        } else {
+                                            rule.copy(id = UUID.randomUUID().toString(), serverId = selectedScopeId, cooldownMinutes = m)
+                                        }
+                                        onUpdateRule(updated)
+                                    },
+                                    valueRange = 1f..60f,
+                                    colors = SliderDefaults.colors(thumbColor = colors.actionPrimary, activeTrackColor = colors.actionPrimary)
                                 )
-                            )
+
+                                if (isOverridden) {
+                                    TextButton(
+                                        onClick = { onDeleteRule(rule.id) },
+                                        modifier = Modifier.align(Alignment.End)
+                                    ) {
+                                        Text("恢复为全局默认", color = colors.error, style = AppTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

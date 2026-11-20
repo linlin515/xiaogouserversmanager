@@ -23,6 +23,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -59,9 +63,11 @@ import com.xiaogou.serverseyes.core.designsystem.theme.AppTheme
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppRadius
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppSpacing
 import com.xiaogou.serverseyes.core.designsystem.tokens.tabular
+import com.xiaogou.serverseyes.core.model.CollectionMode
 import com.xiaogou.serverseyes.core.model.DiagnosticPreset
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.MetricSource
+import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.util.Formatters
 import com.xiaogou.serverseyes.data.repository.ServerUiModel
 import com.xiaogou.serverseyes.ui.DetailOpsState
@@ -74,9 +80,10 @@ private enum class DetailTab(val label: String) {
     OPS("日志与诊断")
 }
 
-private data class PendingRestart(
+private data class PendingWorkload(
     val targetType: LogTargetType,
-    val targetName: String
+    val targetName: String,
+    val action: WorkloadAction
 )
 
 @Composable
@@ -85,10 +92,13 @@ fun ServerDetailPane(
     opsState: DetailOpsState,
     onRefreshServer: (String) -> Unit,
     onChangeHistoryRange: (String, Int) -> Unit,
-    onOpenLogs: (String, LogTargetType, String) -> Unit,
+    onOpenLogs: (String, LogTargetType, String, Int) -> Unit,
+    onRefreshLogs: (Int) -> Unit,
     onCloseLogs: () -> Unit,
-    onRestartTarget: (String, LogTargetType, String) -> Unit,
+    onPerformWorkloadAction: (String, LogTargetType, String, WorkloadAction) -> Unit,
     onRunDiagnostic: (String, String) -> Unit,
+    onTogglePin: (String, Boolean) -> Unit = { _, _ -> },
+    onToggleEnable: (String, Boolean) -> Unit = { _, _ -> },
     onEditServer: (String) -> Unit,
     onDeleteServer: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -105,11 +115,12 @@ fun ServerDetailPane(
     }
 
     var selectedTab by remember(server.config.id) { mutableStateOf(DetailTab.OVERVIEW) }
-    var pendingRestart by remember { mutableStateOf<PendingRestart?>(null) }
+    var pendingAction by remember { mutableStateOf<PendingWorkload?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var customCmd by remember { mutableStateOf("") }
 
     val snap = server.snapshot
+    val isEnabled = server.config.enabled
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -125,11 +136,21 @@ fun ServerDetailPane(
                     verticalAlignment = Alignment.Top
                 ) {
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = server.config.name,
-                            style = AppTheme.typography.titleLarge,
-                            color = colors.textPrimary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (server.config.isPinned) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PushPin,
+                                    contentDescription = "已置顶",
+                                    tint = colors.actionPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Text(
+                                text = server.config.name,
+                                style = AppTheme.typography.titleLarge,
+                                color = colors.textPrimary
+                            )
+                        }
                         Text(
                             text = buildString {
                                 append(server.config.host)
@@ -145,7 +166,16 @@ fun ServerDetailPane(
                             horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            StatusBadge(status = server.status)
+                            if (!isEnabled) {
+                                StatusChipRaw(
+                                    text = "已暂停采集",
+                                    icon = null,
+                                    backgroundColor = colors.surfaceSubtle,
+                                    contentColor = colors.textSecondary
+                                )
+                            } else {
+                                StatusBadge(status = server.status)
+                            }
                             val sourceText = when (snap?.sourceUsed) {
                                 MetricSource.AGENT -> "Agent · ${snap.latencyMs}ms"
                                 MetricSource.SSH -> "SSH · ${snap.latencyMs}ms"
@@ -161,6 +191,13 @@ fun ServerDetailPane(
                     }
 
                     Row {
+                        IconButton(onClick = { onTogglePin(server.config.id, !server.config.isPinned) }) {
+                            Icon(
+                                imageVector = Icons.Rounded.PushPin,
+                                contentDescription = if (server.config.isPinned) "取消置顶" else "置顶",
+                                tint = if (server.config.isPinned) colors.actionPrimary else colors.textSecondary
+                            )
+                        }
                         IconButton(onClick = { onEditServer(server.config.id) }) {
                             Icon(
                                 imageVector = Icons.Rounded.Edit,
@@ -243,25 +280,39 @@ fun ServerDetailPane(
                                 Text(
                                     text = "CPU 与内存趋势",
                                     style = AppTheme.typography.titleSmall,
-                                    color = colors.textPrimary
+                                    color = colors.textPrimary,
+                                    maxLines = 1
                                 )
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    listOf(15 to "15m", 60 to "1h", 360 to "6h").forEach { (mins, label) ->
-                                        val active = opsState.historyMinutes == mins
-                                        Surface(
-                                            onClick = { onChangeHistoryRange(server.config.id, mins) },
-                                            shape = RoundedCornerShape(AppRadius.full),
-                                            color = if (active) colors.infoSoft else colors.surfaceSubtle
-                                        ) {
-                                            Text(
-                                                text = label,
-                                                style = AppTheme.typography.labelSmall,
-                                                color = if (active) colors.actionPrimary else colors.textSecondary,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                            )
-                                        }
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                listOf(
+                                    15 to "15m",
+                                    60 to "1h",
+                                    360 to "6h",
+                                    1440 to "24h",
+                                    2880 to "48h"
+                                ).forEach { (mins, label) ->
+                                    val active = opsState.historyMinutes == mins
+                                    Surface(
+                                        onClick = { onChangeHistoryRange(server.config.id, mins) },
+                                        shape = RoundedCornerShape(AppRadius.full),
+                                        color = if (active) colors.infoSoft else colors.surfaceSubtle
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = AppTheme.typography.labelSmall,
+                                            color = if (active) colors.actionPrimary else colors.textSecondary,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
                                     }
                                 }
+                            }
                             }
                             Spacer(Modifier.height(AppSpacing.space2))
                             val cpuSeries = opsState.historyPoints.map { it.cpuPercent }
@@ -303,13 +354,46 @@ fun ServerDetailPane(
                         }
                     }
 
+                    // Network & Load charts card
+                    if (opsState.historyPoints.size >= 2) {
+                        item {
+                            AppCard(modifier = Modifier.fillMaxWidth()) {
+                                SectionHeader(title = "网络吞吐 (RX/TX) 与 Load1 趋势")
+                                Spacer(Modifier.height(AppSpacing.space2))
+                                val rxSeries = opsState.historyPoints.map { it.netRxBytesPerSec.toDouble() / 1024.0 }
+                                val txSeries = opsState.historyPoints.map { it.netTxBytesPerSec.toDouble() / 1024.0 }
+                                val loadSeries = opsState.historyPoints.map { it.load1 }
+                                val maxNetKb = (rxSeries + txSeries).maxOrNull()?.coerceAtLeast(10.0) ?: 100.0
+
+                                Text("网络吞吐 (KB/s, 实线:RX / 虚线:TX)", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                TimeSeriesLineChart(
+                                    values = rxSeries,
+                                    lineColor = colors.actionPrimary,
+                                    secondaryValues = txSeries,
+                                    secondaryColor = colors.warning,
+                                    maxValue = maxNetKb,
+                                    height = 100.dp
+                                )
+                                Spacer(Modifier.height(AppSpacing.space2))
+                                Text("Load 1 均负载", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                TimeSeriesLineChart(
+                                    values = loadSeries,
+                                    lineColor = colors.info,
+                                    maxValue = loadSeries.maxOrNull()?.coerceAtLeast(1.0) ?: 2.0,
+                                    height = 80.dp
+                                )
+                            }
+                        }
+                    }
+
+                    // Memory & Swap card
                     item {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
                         ) {
                             AppCard(modifier = Modifier.weight(1f)) {
-                                Text("内存与 Swap", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                Text("物理内存", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
                                 Spacer(Modifier.height(4.dp))
                                 Text(
                                     text = "${snap.memPercent.roundToInt()}%",
@@ -325,19 +409,25 @@ fun ServerDetailPane(
                                 MetricProgressBar(percent = snap.memPercent)
                             }
                             AppCard(modifier = Modifier.weight(1f)) {
-                                Text("实时网络吞吐", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                val swapPct = if (snap.swapTotalBytes > 0) {
+                                    (snap.swapUsedBytes.toDouble() / snap.swapTotalBytes.toDouble() * 100.0).coerceIn(0.0, 100.0)
+                                } else 0.0
+                                Text("Swap 交换区", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    text = "↓ ${Formatters.formatBytesPerSec(snap.netRxBytesPerSec)}",
-                                    style = AppTheme.typography.titleSmall.tabular(),
-                                    color = colors.actionPrimary
+                                    text = if (snap.swapTotalBytes > 0) "${swapPct.roundToInt()}%" else "未启用",
+                                    style = AppTheme.typography.titleMedium.tabular(),
+                                    color = colors.textPrimary
                                 )
-                                Spacer(Modifier.height(2.dp))
                                 Text(
-                                    text = "↑ ${Formatters.formatBytesPerSec(snap.netTxBytesPerSec)}",
-                                    style = AppTheme.typography.titleSmall.tabular(),
+                                    text = if (snap.swapTotalBytes > 0) {
+                                        "${Formatters.formatBytes(snap.swapUsedBytes)} / ${Formatters.formatBytes(snap.swapTotalBytes)}"
+                                    } else "0 B",
+                                    style = AppTheme.typography.bodySmall.tabular(),
                                     color = colors.textSecondary
                                 )
+                                Spacer(Modifier.height(AppSpacing.space2))
+                                MetricProgressBar(percent = swapPct)
                             }
                         }
                     }
@@ -430,6 +520,9 @@ fun ServerDetailPane(
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(c.name, style = AppTheme.typography.titleSmall, color = colors.textPrimary)
                                                 Text("${c.image} · ${c.statusText}", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                                if (c.ports.isNotBlank()) {
+                                                    Text("端口: ${c.ports}", style = AppTheme.typography.bodySmall, color = colors.actionPrimary)
+                                                }
                                             }
                                             StatusChipRaw(
                                                 text = if (c.isRunning) "运行中" else c.state,
@@ -438,18 +531,40 @@ fun ServerDetailPane(
                                                 contentColor = if (c.isRunning) colors.success else colors.error
                                             )
                                         }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                                        ) {
                                             SecondaryButton(
                                                 text = "查看日志",
-                                                onClick = { onOpenLogs(server.config.id, LogTargetType.DOCKER_CONTAINER, c.name) }
+                                                onClick = { onOpenLogs(server.config.id, LogTargetType.DOCKER_CONTAINER, c.name, 150) }
                                             )
-                                            DangerButton(
-                                                text = "重启",
-                                                enabled = !opsState.isActionPending,
-                                                onClick = {
-                                                    pendingRestart = PendingRestart(LogTargetType.DOCKER_CONTAINER, c.name)
-                                                }
-                                            )
+                                            if (c.isRunning) {
+                                                SecondaryButton(
+                                                    text = "停止",
+                                                    icon = Icons.Rounded.Stop,
+                                                    enabled = !opsState.isActionPending,
+                                                    onClick = {
+                                                        pendingAction = PendingWorkload(LogTargetType.DOCKER_CONTAINER, c.name, WorkloadAction.STOP)
+                                                    }
+                                                )
+                                                DangerButton(
+                                                    text = "重启",
+                                                    enabled = !opsState.isActionPending,
+                                                    onClick = {
+                                                        pendingAction = PendingWorkload(LogTargetType.DOCKER_CONTAINER, c.name, WorkloadAction.RESTART)
+                                                    }
+                                                )
+                                            } else {
+                                                PrimaryButton(
+                                                    text = "启动",
+                                                    icon = Icons.Rounded.PlayArrow,
+                                                    enabled = !opsState.isActionPending,
+                                                    onClick = {
+                                                        pendingAction = PendingWorkload(LogTargetType.DOCKER_CONTAINER, c.name, WorkloadAction.START)
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -492,13 +607,13 @@ fun ServerDetailPane(
                                         Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
                                             SecondaryButton(
                                                 text = "日志",
-                                                onClick = { onOpenLogs(server.config.id, LogTargetType.SYSTEMD_SERVICE, sv.unit) }
+                                                onClick = { onOpenLogs(server.config.id, LogTargetType.SYSTEMD_SERVICE, sv.unit, 150) }
                                             )
                                             DangerButton(
                                                 text = "重启",
                                                 enabled = !opsState.isActionPending,
                                                 onClick = {
-                                                    pendingRestart = PendingRestart(LogTargetType.SYSTEMD_SERVICE, sv.unit)
+                                                    pendingAction = PendingWorkload(LogTargetType.SYSTEMD_SERVICE, sv.unit, WorkloadAction.RESTART)
                                                 }
                                             )
                                         }
@@ -532,18 +647,30 @@ fun ServerDetailPane(
                     AppCard(modifier = Modifier.fillMaxWidth()) {
                         SectionHeader(title = "快捷只读诊断（SSH）")
                         Spacer(Modifier.height(AppSpacing.space2))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
-                        ) {
+
+                        if (server.config.collectionMode == CollectionMode.AGENT_ONLY) {
+                            Text(
+                                text = "提示：当前服务器配置为「仅 Agent」模式。执行只读命令诊断需要 SSH 登录凭据，建议在编辑页面将模式切换为「混合模式」或「仅 SSH」。",
+                                style = AppTheme.typography.bodySmall,
+                                color = colors.warning,
+                                modifier = Modifier.padding(bottom = AppSpacing.space2)
+                            )
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
                             DiagnosticPreset.DEFAULT_PRESETS.forEach { preset ->
-                                SecondaryButton(
-                                    text = preset.title,
-                                    enabled = !opsState.isRunningDiag,
-                                    onClick = { onRunDiagnostic(server.config.id, preset.command) }
-                                )
+                                Surface(
+                                    onClick = { onRunDiagnostic(server.config.id, preset.command) },
+                                    enabled = !opsState.isRunningDiag && server.config.collectionMode != CollectionMode.AGENT_ONLY,
+                                    shape = RoundedCornerShape(AppRadius.sm),
+                                    color = colors.surfaceSubtle,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = AppSpacing.space3, vertical = AppSpacing.space2)) {
+                                        Text(preset.title, style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                                        Text(preset.description, style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                    }
+                                }
                             }
                         }
                         Spacer(Modifier.height(AppSpacing.space3))
@@ -558,14 +685,14 @@ fun ServerDetailPane(
                             PrimaryButton(
                                 text = "执行命令",
                                 loading = opsState.isRunningDiag,
-                                enabled = customCmd.isNotBlank(),
+                                enabled = customCmd.isNotBlank() && server.config.collectionMode != CollectionMode.AGENT_ONLY,
                                 icon = Icons.Rounded.Terminal,
                                 modifier = Modifier.weight(1f),
                                 onClick = { onRunDiagnostic(server.config.id, customCmd.trim()) }
                             )
                             SecondaryButton(
                                 text = "系统日志",
-                                onClick = { onOpenLogs(server.config.id, LogTargetType.SYSTEM_JOURNAL, "system") }
+                                onClick = { onOpenLogs(server.config.id, LogTargetType.SYSTEM_JOURNAL, "system", 150) }
                             )
                         }
                         Spacer(Modifier.height(AppSpacing.space3))
@@ -591,17 +718,17 @@ fun ServerDetailPane(
         }
     }
 
-    pendingRestart?.let { target ->
+    pendingAction?.let { target ->
         ConfirmActionDialog(
-            title = "确认重启目标？",
-            message = "将向 ${server.config.name} 发送重启 ${target.targetName} 的指令，期间相关连接可能短暂中断。",
-            confirmText = "确认重启",
-            isDangerous = true,
+            title = "确认${target.action.label}目标？",
+            message = "将向 ${server.config.name} 发送${target.action.label} ${target.targetName} 的指令，期间相关服务可能短暂中断。",
+            confirmText = "确认${target.action.label}",
+            isDangerous = target.action == WorkloadAction.STOP || target.action == WorkloadAction.RESTART,
             onConfirm = {
-                onRestartTarget(server.config.id, target.targetType, target.targetName)
-                pendingRestart = null
+                onPerformWorkloadAction(server.config.id, target.targetType, target.targetName, target.action)
+                pendingAction = null
             },
-            onDismiss = { pendingRestart = null }
+            onDismiss = { pendingAction = null }
         )
     }
 
@@ -623,7 +750,11 @@ fun ServerDetailPane(
         LogViewerDialog(
             title = opsState.logTitle,
             lines = opsState.logLines,
+            currentLinesCount = opsState.logLinesCount,
+            errorMessage = opsState.logError,
             isLoading = opsState.isLoadingLogs,
+            onRefresh = { onRefreshLogs(opsState.logLinesCount) },
+            onSelectLines = { n -> onRefreshLogs(n) },
             onDismiss = onCloseLogs
         )
     }
@@ -633,7 +764,11 @@ fun ServerDetailPane(
 private fun LogViewerDialog(
     title: String,
     lines: List<String>,
+    currentLinesCount: Int,
+    errorMessage: String?,
     isLoading: Boolean,
+    onRefresh: () -> Unit,
+    onSelectLines: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = AppTheme.colors
@@ -647,7 +782,7 @@ private fun LogViewerDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 320.dp, max = 560.dp),
+                .heightIn(min = 340.dp, max = 580.dp),
             shape = RoundedCornerShape(AppRadius.lg),
             color = colors.surface,
             border = BorderStroke(1.dp, colors.border)
@@ -664,11 +799,49 @@ private fun LogViewerDialog(
                         color = colors.textPrimary,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = onDismiss) {
-                        Text("关闭", color = colors.actionPrimary)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onRefresh, enabled = !isLoading) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "刷新日志",
+                                tint = colors.textSecondary
+                            )
+                        }
+                        TextButton(onClick = onDismiss) {
+                            Text("关闭", color = colors.actionPrimary)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(AppSpacing.space1))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(50, 150, 300).forEach { count ->
+                            val active = currentLinesCount == count
+                            Surface(
+                                onClick = { onSelectLines(count) },
+                                shape = RoundedCornerShape(AppRadius.full),
+                                color = if (active) colors.infoSoft else colors.surfaceSubtle
+                            ) {
+                                Text(
+                                    text = "${count}行",
+                                    style = AppTheme.typography.labelSmall,
+                                    color = if (active) colors.actionPrimary else colors.textSecondary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                    if (errorMessage != null) {
+                        Text("获取失败", style = AppTheme.typography.bodySmall, color = colors.error)
                     }
                 }
                 Spacer(Modifier.height(AppSpacing.space2))
+
                 AppTextField(
                     label = "关键词过滤",
                     value = filterQuery,
@@ -689,6 +862,15 @@ private fun LogViewerDialog(
                             modifier = Modifier.align(Alignment.Center).size(28.dp),
                             color = colors.actionPrimary
                         )
+                    } else if (errorMessage != null) {
+                        Column(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(errorMessage, style = AppTheme.typography.bodySmall, color = colors.error)
+                            SecondaryButton(text = "重试", onClick = onRefresh)
+                        }
                     } else {
                         SelectionContainer {
                             Text(

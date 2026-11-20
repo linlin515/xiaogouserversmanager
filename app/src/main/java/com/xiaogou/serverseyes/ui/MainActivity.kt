@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,11 +15,14 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
@@ -86,6 +90,24 @@ private sealed interface ActiveRoute {
     data object Top : ActiveRoute
     data class Detail(val serverId: String) : ActiveRoute
     data class Editor(val serverId: String?) : ActiveRoute
+
+    fun encode(): String = when (this) {
+        Top -> "TOP"
+        is Detail -> "DETAIL:$serverId"
+        is Editor -> "EDITOR:${serverId.orEmpty()}"
+    }
+
+    companion object {
+        fun decode(raw: String?): ActiveRoute {
+            if (raw.isNullOrBlank()) return Top
+            val parts = raw.split(":", limit = 2)
+            return when (parts[0]) {
+                "DETAIL" -> parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { Detail(it) } ?: Top
+                "EDITOR" -> Editor(parts.getOrNull(1)?.takeIf { it.isNotBlank() })
+                else -> Top
+            }
+        }
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -125,7 +147,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ServersEyesApp(vm: MainViewModel) {
     val context = LocalContext.current
@@ -141,10 +163,18 @@ fun ServersEyesApp(vm: MainViewModel) {
     val lastRefreshMs by vm.lastRefreshMs.collectAsStateWithLifecycle()
     val selectedServerId by vm.selectedServerId.collectAsStateWithLifecycle()
     val groupFilter by vm.groupFilter.collectAsStateWithLifecycle()
+    val searchQuery by vm.searchQuery.collectAsStateWithLifecycle()
     val detailOps by vm.detailOps.collectAsStateWithLifecycle()
 
-    var currentTab by rememberSaveable { mutableStateOf(TopDestination.SERVERS) }
-    var activeRoute by remember { mutableStateOf<ActiveRoute>(ActiveRoute.Top) }
+    var currentTabName by rememberSaveable { mutableStateOf(TopDestination.SERVERS.name) }
+    val currentTab = runCatching { TopDestination.valueOf(currentTabName) }.getOrDefault(TopDestination.SERVERS)
+
+    var activeRouteEncoded by rememberSaveable { mutableStateOf("TOP") }
+    val activeRoute = ActiveRoute.decode(activeRouteEncoded)
+    fun setRoute(route: ActiveRoute) {
+        activeRouteEncoded = route.encode()
+    }
+
     val snackbarHostState = remember { SnackbarHostState() }
 
     var hasNotifPermission by remember {
@@ -184,6 +214,11 @@ fun ServersEyesApp(vm: MainViewModel) {
         }
     }
 
+    // System back: leave Detail/Editor before exiting the app
+    BackHandler(enabled = activeRoute != ActiveRoute.Top) {
+        setRoute(ActiveRoute.Top)
+    }
+
     val unreadAlerts = alertEvents.count { !it.acknowledged }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -204,7 +239,9 @@ fun ServersEyesApp(vm: MainViewModel) {
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             containerColor = colors.background,
-            contentWindowInsets = WindowInsets.safeDrawing,
+            // Exclude IME so inner padding never double-counts the keyboard height.
+            // Child screens apply a single imePadding() where needed.
+            contentWindowInsets = WindowInsets.safeDrawing.exclude(WindowInsets.ime),
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 Column {
@@ -232,7 +269,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                         },
                         navigationIcon = {
                             if (showBack) {
-                                IconButton(onClick = { activeRoute = ActiveRoute.Top }) {
+                                IconButton(onClick = { setRoute(ActiveRoute.Top) }) {
                                     Icon(
                                         imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                                         contentDescription = "返回",
@@ -266,7 +303,7 @@ fun ServersEyesApp(vm: MainViewModel) {
             floatingActionButton = {
                 if (activeRoute == ActiveRoute.Top && currentTab == TopDestination.SERVERS && servers.isNotEmpty()) {
                     ExtendedFloatingActionButton(
-                        onClick = { activeRoute = ActiveRoute.Editor(null) },
+                        onClick = { setRoute(ActiveRoute.Editor(null)) },
                         containerColor = colors.actionPrimary,
                         contentColor = colors.onActionPrimary,
                         icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
@@ -283,7 +320,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                                 val selected = currentTab == dest
                                 NavigationBarItem(
                                     selected = selected,
-                                    onClick = { currentTab = dest },
+                                    onClick = { currentTabName = dest.name },
                                     icon = {
                                         val iconVec = when (dest) {
                                             TopDestination.SERVERS -> Icons.Rounded.GridView
@@ -317,6 +354,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
             ) {
                 if (isWide && activeRoute == ActiveRoute.Top) {
                     NavigationRail(
@@ -327,7 +365,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                             val selected = currentTab == dest
                             NavigationRailItem(
                                 selected = selected,
-                                onClick = { currentTab = dest },
+                                onClick = { currentTabName = dest.name },
                                 icon = {
                                     val iconVec = when (dest) {
                                         TopDestination.SERVERS -> Icons.Rounded.GridView
@@ -363,9 +401,10 @@ fun ServersEyesApp(vm: MainViewModel) {
                                 editingServerId = route.serverId,
                                 loadExisting = { id -> vm.getServerForEdit(id) },
                                 onTestConnection = { cfg, trust -> vm.testConnection(cfg, trust) },
+                                onTrustFingerprint = { id, fp -> vm.trustFingerprint(id, fp) },
                                 onSave = { cfg ->
                                     vm.saveServer(cfg) {
-                                        activeRoute = ActiveRoute.Top
+                                        setRoute(ActiveRoute.Top)
                                     }
                                 }
                             )
@@ -378,13 +417,18 @@ fun ServersEyesApp(vm: MainViewModel) {
                                 opsState = detailOps,
                                 onRefreshServer = { vm.refreshNow() },
                                 onChangeHistoryRange = { id, mins -> vm.changeHistoryRange(id, mins) },
-                                onOpenLogs = { id, t, name -> vm.openLogs(id, t, name) },
+                                onOpenLogs = { id, t, name, lines -> vm.openLogs(id, t, name, lines) },
+                                onRefreshLogs = { lines -> vm.refreshOpenLogs(lines) },
                                 onCloseLogs = { vm.closeLogs() },
-                                onRestartTarget = { id, t, name -> vm.restartTarget(id, t, name) },
+                                onPerformWorkloadAction = { id, t, name, action ->
+                                    vm.performWorkloadAction(id, t, name, action)
+                                },
                                 onRunDiagnostic = { id, cmd -> vm.runDiagnostic(id, cmd) },
-                                onEditServer = { id -> activeRoute = ActiveRoute.Editor(id) },
+                                onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                onToggleEnable = { id, en -> vm.setEnabled(id, en) },
+                                onEditServer = { id -> setRoute(ActiveRoute.Editor(id)) },
                                 onDeleteServer = { id ->
-                                    vm.deleteServer(id) { activeRoute = ActiveRoute.Top }
+                                    vm.deleteServer(id) { setRoute(ActiveRoute.Top) }
                                 }
                             )
                         }
@@ -398,10 +442,13 @@ fun ServersEyesApp(vm: MainViewModel) {
                                                 servers = servers,
                                                 isInitialLoading = isInitialLoading,
                                                 groupFilter = groupFilter,
+                                                searchQuery = searchQuery,
                                                 selectedServerId = selectedServerId,
                                                 onSelectFilter = { vm.selectGroupFilter(it) },
+                                                onSearchQueryChange = { vm.setSearchQuery(it) },
                                                 onSelectServer = { id -> vm.selectServer(id) },
-                                                onAddServer = { activeRoute = ActiveRoute.Editor(null) },
+                                                onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                                onAddServer = { setRoute(ActiveRoute.Editor(null)) },
                                                 onRetryAll = { vm.refreshNow() },
                                                 modifier = Modifier.weight(1.05f).fillMaxHeight()
                                             )
@@ -413,11 +460,16 @@ fun ServersEyesApp(vm: MainViewModel) {
                                                 opsState = detailOps,
                                                 onRefreshServer = { vm.refreshNow() },
                                                 onChangeHistoryRange = { id, mins -> vm.changeHistoryRange(id, mins) },
-                                                onOpenLogs = { id, t, name -> vm.openLogs(id, t, name) },
+                                                onOpenLogs = { id, t, name, lines -> vm.openLogs(id, t, name, lines) },
+                                                onRefreshLogs = { lines -> vm.refreshOpenLogs(lines) },
                                                 onCloseLogs = { vm.closeLogs() },
-                                                onRestartTarget = { id, t, name -> vm.restartTarget(id, t, name) },
+                                                onPerformWorkloadAction = { id, t, name, action ->
+                                                    vm.performWorkloadAction(id, t, name, action)
+                                                },
                                                 onRunDiagnostic = { id, cmd -> vm.runDiagnostic(id, cmd) },
-                                                onEditServer = { id -> activeRoute = ActiveRoute.Editor(id) },
+                                                onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                                onToggleEnable = { id, en -> vm.setEnabled(id, en) },
+                                                onEditServer = { id -> setRoute(ActiveRoute.Editor(id)) },
                                                 onDeleteServer = { id -> vm.deleteServer(id) {} },
                                                 modifier = Modifier.weight(1f).fillMaxHeight()
                                             )
@@ -427,13 +479,16 @@ fun ServersEyesApp(vm: MainViewModel) {
                                             servers = servers,
                                             isInitialLoading = isInitialLoading,
                                             groupFilter = groupFilter,
+                                            searchQuery = searchQuery,
                                             selectedServerId = selectedServerId,
                                             onSelectFilter = { vm.selectGroupFilter(it) },
+                                            onSearchQueryChange = { vm.setSearchQuery(it) },
                                             onSelectServer = { id ->
                                                 vm.selectServer(id)
-                                                activeRoute = ActiveRoute.Detail(id)
+                                                setRoute(ActiveRoute.Detail(id))
                                             },
-                                            onAddServer = { activeRoute = ActiveRoute.Editor(null) },
+                                            onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                            onAddServer = { setRoute(ActiveRoute.Editor(null)) },
                                             onRetryAll = { vm.refreshNow() }
                                         )
                                     }
@@ -443,6 +498,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                                     AlertsScreen(
                                         rules = alertRules,
                                         events = alertEvents,
+                                        servers = servers,
                                         hasNotificationPermission = hasNotifPermission,
                                         onRequestNotificationPermission = {
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -450,6 +506,7 @@ fun ServersEyesApp(vm: MainViewModel) {
                                             }
                                         },
                                         onUpdateRule = { vm.saveAlertRule(it) },
+                                        onDeleteRule = { vm.deleteAlertRule(it) },
                                         onAcknowledge = { vm.acknowledgeAlert(it) },
                                         onAcknowledgeAll = { vm.acknowledgeAllAlerts() },
                                         onClearAll = { vm.clearAlerts() }
@@ -464,7 +521,13 @@ fun ServersEyesApp(vm: MainViewModel) {
                                         onSetBackgroundWork = { vm.setBackgroundWorkEnabled(it) },
                                         onSetForegroundService = { vm.setForegroundServiceEnabled(it) },
                                         onSetNotifications = { vm.setNotificationsEnabled(it) },
-                                        onClearCache = { vm.clearLocalCache() }
+                                        onClearCache = { vm.clearLocalCache() },
+                                        onExportBackup = { includeSecrets, pass ->
+                                            vm.exportBackupJson(includeSecrets, pass)
+                                        },
+                                        onImportBackup = { json, pass ->
+                                            vm.importBackupJson(json, pass)
+                                        }
                                     )
                                 }
                             }

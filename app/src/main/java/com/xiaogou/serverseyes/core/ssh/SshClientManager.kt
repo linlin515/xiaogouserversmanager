@@ -13,6 +13,7 @@ import com.xiaogou.serverseyes.core.model.NetBytes
 import com.xiaogou.serverseyes.core.model.ServerConfig
 import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.SshAuthType
+import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.parser.HostKeyMismatchException
 import com.xiaogou.serverseyes.core.parser.HostKeyUntrustedException
 import com.xiaogou.serverseyes.core.parser.LinuxMetricParser
@@ -152,18 +153,26 @@ class SshClientManager {
         config: ServerConfig,
         targetType: LogTargetType,
         targetName: String
+    ): Result<String> = performWorkloadAction(config, targetType, targetName, WorkloadAction.RESTART)
+
+    suspend fun performWorkloadAction(
+        config: ServerConfig,
+        targetType: LogTargetType,
+        targetName: String,
+        action: WorkloadAction
     ): Result<String> = withContext(Dispatchers.IO) {
         lockFor(config.id).withLock {
             runCatching {
                 val quotedTarget = shellQuote(targetName)
+                val verb = action.apiValue
                 val command = when (targetType) {
-                    LogTargetType.DOCKER_CONTAINER -> "docker restart $quotedTarget"
-                    LogTargetType.SYSTEMD_SERVICE -> "sudo -n systemctl restart $quotedTarget || systemctl restart $quotedTarget"
-                    LogTargetType.SYSTEM_JOURNAL -> error("系统日志不支持重启操作")
+                    LogTargetType.DOCKER_CONTAINER -> "docker $verb $quotedTarget"
+                    LogTargetType.SYSTEMD_SERVICE -> "sudo -n systemctl $verb $quotedTarget || systemctl $verb $quotedTarget"
+                    LogTargetType.SYSTEM_JOURNAL -> error("系统日志不支持启停或重启操作")
                 }
                 val session = getOrCreatePooledSession(config)
                 val out = execCommand(session, command, timeoutMs = 20_000)
-                out.ifBlank { "已完成重启指令：$targetName" }
+                out.ifBlank { "已完成${action.label}指令：$targetName" }
             }
         }
     }

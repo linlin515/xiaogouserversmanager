@@ -28,6 +28,12 @@ interface ServerDao {
 
     @Query("UPDATE servers SET trustedHostFingerprint = :fingerprint WHERE id = :id")
     suspend fun updateFingerprint(id: String, fingerprint: String)
+
+    @Query("UPDATE servers SET isPinned = :pinned WHERE id = :id")
+    suspend fun updatePinned(id: String, pinned: Boolean)
+
+    @Query("UPDATE servers SET enabled = :enabled WHERE id = :id")
+    suspend fun updateEnabled(id: String, enabled: Boolean)
 }
 
 @Dao

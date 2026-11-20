@@ -4,18 +4,22 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -27,6 +31,7 @@ import com.xiaogou.serverseyes.core.designsystem.patterns.KpiMetric
 import com.xiaogou.serverseyes.core.designsystem.patterns.KpiPulseStrip
 import com.xiaogou.serverseyes.core.designsystem.patterns.LoadingSkeletonList
 import com.xiaogou.serverseyes.core.designsystem.theme.AppTheme
+import com.xiaogou.serverseyes.core.designsystem.tokens.AppRadius
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppSpacing
 import com.xiaogou.serverseyes.core.model.ServerStatus
 import com.xiaogou.serverseyes.core.util.Formatters
@@ -39,9 +44,12 @@ fun DashboardPane(
     servers: List<ServerUiModel>,
     isInitialLoading: Boolean,
     groupFilter: String,
+    searchQuery: String = "",
     selectedServerId: String?,
     onSelectFilter: (String) -> Unit,
+    onSearchQueryChange: (String) -> Unit = {},
     onSelectServer: (String) -> Unit,
+    onTogglePin: (String, Boolean) -> Unit = { _, _ -> },
     onAddServer: () -> Unit,
     onRetryAll: () -> Unit,
     modifier: Modifier = Modifier
@@ -77,31 +85,39 @@ fun DashboardPane(
         return
     }
 
-    val onlineCount = servers.count { it.status != ServerStatus.OFFLINE && it.snapshot != null }
+    val onlineCount = servers.count { it.status != ServerStatus.OFFLINE && it.snapshot != null && it.config.enabled }
     val alertCount = servers.count {
-        it.status == ServerStatus.WARNING || it.status == ServerStatus.CRITICAL || it.status == ServerStatus.OFFLINE
+        it.config.enabled && (it.status == ServerStatus.WARNING || it.status == ServerStatus.CRITICAL || it.status == ServerStatus.OFFLINE)
     }
-    val totalRx = servers.sumOf { it.snapshot?.netRxBytesPerSec ?: 0L }
-    val activeLoads = servers.mapNotNull { it.snapshot?.load1 }
+    val totalRx = servers.filter { it.config.enabled }.sumOf { it.snapshot?.netRxBytesPerSec ?: 0L }
+    val activeLoads = servers.filter { it.config.enabled }.mapNotNull { it.snapshot?.load1 }
     val avgLoad = if (activeLoads.isNotEmpty()) activeLoads.average() else 0.0
-    val offlineServers = servers.filter { it.status == ServerStatus.OFFLINE || (it.lastError != null && it.snapshot == null) }
+    val offlineServers = servers.filter { it.config.enabled && (it.status == ServerStatus.OFFLINE || (it.lastError != null && it.snapshot == null)) }
 
     val groups = listOf("全部", "异常优先") + servers.map { it.config.groupName }.filter { it.isNotBlank() }.distinct()
-    val filtered = when (groupFilter) {
-        "全部" -> servers
-        "异常优先" -> servers.filter {
-            it.status == ServerStatus.WARNING || it.status == ServerStatus.CRITICAL || it.status == ServerStatus.OFFLINE
+    val filtered = servers.filter { item ->
+        val matchesGroup = when (groupFilter) {
+            "全部" -> true
+            "异常优先" -> item.status == ServerStatus.WARNING || item.status == ServerStatus.CRITICAL || item.status == ServerStatus.OFFLINE
+            else -> item.config.groupName == groupFilter
         }
-        else -> servers.filter { it.config.groupName == groupFilter }
+        val matchesSearch = searchQuery.isBlank() ||
+            item.config.name.contains(searchQuery, ignoreCase = true) ||
+            item.config.host.contains(searchQuery, ignoreCase = true) ||
+            item.config.groupName.contains(searchQuery, ignoreCase = true)
+        matchesGroup && matchesSearch
     }.sortedWith(
-        compareByDescending<ServerUiModel> {
-            when (it.status) {
-                ServerStatus.CRITICAL -> 4
-                ServerStatus.OFFLINE -> 3
-                ServerStatus.WARNING -> 2
-                else -> 0
+        compareByDescending<ServerUiModel> { it.config.isPinned }
+            .thenByDescending {
+                when (it.status) {
+                    ServerStatus.CRITICAL -> 4
+                    ServerStatus.OFFLINE -> 3
+                    ServerStatus.WARNING -> 2
+                    else -> 0
+                }
             }
-        }.thenByDescending { it.config.isPinned }.thenBy { it.config.sortOrder }
+            .thenBy { it.config.sortOrder }
+            .thenBy { it.config.name }
     )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
@@ -119,6 +135,49 @@ fun DashboardPane(
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.space3)
         ) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = {
+                        Text(
+                            text = "搜索节点名称 / IP / 分组...",
+                            style = AppTheme.typography.bodyMedium,
+                            color = colors.textDisabled
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = "搜索",
+                            tint = colors.textSecondary
+                        )
+                    },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearchQueryChange("") }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Clear,
+                                    contentDescription = "清空搜索",
+                                    tint = colors.textSecondary
+                                )
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.md),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = colors.actionPrimary,
+                        unfocusedBorderColor = colors.border,
+                        focusedContainerColor = colors.surface,
+                        unfocusedContainerColor = colors.surface,
+                        focusedTextColor = colors.textPrimary,
+                        unfocusedTextColor = colors.textPrimary
+                    )
+                )
+            }
+
             if (offlineServers.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     val names = offlineServers.take(2).joinToString("、") { it.config.name }
@@ -153,8 +212,8 @@ fun DashboardPane(
             if (filtered.isEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     EmptyState(
-                        title = "当前筛选无匹配节点",
-                        description = "所有服务器目前运行状态良好，可切换回“全部”查看全部节点。"
+                        title = "无匹配节点",
+                        description = if (searchQuery.isNotEmpty()) "未找到与「$searchQuery」相关的服务器" else "当前筛选无节点数据。"
                     )
                 }
             } else {
@@ -162,7 +221,8 @@ fun DashboardPane(
                     ServerSummaryCard(
                         item = item,
                         isSelected = item.config.id == selectedServerId,
-                        onClick = { onSelectServer(item.config.id) }
+                        onClick = { onSelectServer(item.config.id) },
+                        onTogglePin = { onTogglePin(item.config.id, !item.config.isPinned) }
                     )
                 }
             }

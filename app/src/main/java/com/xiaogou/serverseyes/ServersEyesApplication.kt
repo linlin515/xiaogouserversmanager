@@ -8,6 +8,7 @@ import com.xiaogou.serverseyes.data.local.AppDatabase
 import com.xiaogou.serverseyes.data.local.SettingsStore
 import com.xiaogou.serverseyes.data.repository.ServerRepository
 import com.xiaogou.serverseyes.service.AlertNotifier
+import com.xiaogou.serverseyes.service.ForegroundMonitorService
 import com.xiaogou.serverseyes.service.MonitoringWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +49,9 @@ class ServersEyesApplication : Application() {
             container.repository.ensureDefaultAlertRules()
             val settings = container.settingsStore.settingsFlow.first()
             MonitoringWorker.schedule(this@ServersEyesApplication, settings.backgroundWorkEnabled)
+            if (settings.foregroundServiceEnabled) {
+                runCatching { ForegroundMonitorService.setRunning(this@ServersEyesApplication, true) }
+            }
         }
     }
 }

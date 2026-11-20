@@ -13,6 +13,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -38,6 +41,7 @@ class ForegroundMonitorService : Service() {
         }
 
         if (monitorJob?.isActive != true) {
+            _isServiceRunning.value = true
             monitorJob = serviceScope.launch {
                 while (isActive) {
                     runCatching { app.container.repository.refreshAllServers() }
@@ -60,12 +64,16 @@ class ForegroundMonitorService : Service() {
     }
 
     override fun onDestroy() {
+        _isServiceRunning.value = false
         monitorJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
 
     companion object {
+        private val _isServiceRunning = MutableStateFlow(false)
+        val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
+
         fun setRunning(context: Context, running: Boolean) {
             val intent = Intent(context, ForegroundMonitorService::class.java)
             if (running) {

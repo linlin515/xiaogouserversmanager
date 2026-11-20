@@ -11,6 +11,7 @@ import com.xiaogou.serverseyes.core.model.MetricPoint
 import com.xiaogou.serverseyes.core.model.ServerConfig
 import com.xiaogou.serverseyes.core.model.ServerStatus
 import com.xiaogou.serverseyes.core.model.ThemePreference
+import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.parser.ErrorMapper
 import com.xiaogou.serverseyes.data.local.AppSettings
 import com.xiaogou.serverseyes.data.repository.ConnectionTestSummary
@@ -33,8 +34,13 @@ import kotlinx.coroutines.launch
 data class DetailOpsState(
     val historyPoints: List<MetricPoint> = emptyList(),
     val historyMinutes: Int = 60,
+    val logServerId: String = "",
+    val logTargetType: LogTargetType = LogTargetType.SYSTEM_JOURNAL,
+    val logTargetName: String = "",
+    val logLinesCount: Int = 150,
     val logTitle: String = "",
     val logLines: List<String> = emptyList(),
+    val logError: String? = null,
     val isLogsOpen: Boolean = false,
     val isLoadingLogs: Boolean = false,
     val diagOutput: String = "点击上方预设诊断项或输入只读命令开始排查",
@@ -74,6 +80,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _groupFilter = MutableStateFlow("全部")
     val groupFilter: StateFlow<String> = _groupFilter.asStateFlow()
 
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
     private val _detailOps = MutableStateFlow(DetailOpsState())
     val detailOps: StateFlow<DetailOpsState> = _detailOps.asStateFlow()
 
@@ -98,7 +107,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (pollingJob?.isActive == true) return
         pollingJob = viewModelScope.launch {
             while (isActive) {
-                performRefreshCycle()
+                if (!ForegroundMonitorService.isServiceRunning.value) {
+                    performRefreshCycle()
+                } else {
+                    _selectedServerId.value?.let { id ->
+                        loadHistoryInternal(id, _detailOps.value.historyMinutes)
+                    }
+                }
                 val intervalSec = settingsStore.settingsFlow.first().pollIntervalSeconds
                 delay(intervalSec * 1000L)
             }
@@ -134,6 +149,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _groupFilter.value = group
     }
 
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
     fun selectServer(serverId: String) {
         _selectedServerId.value = serverId
         _detailOps.value = DetailOpsState()
@@ -155,35 +174,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _detailOps.value = _detailOps.value.copy(historyPoints = pts)
     }
 
-    fun openLogs(serverId: String, targetType: LogTargetType, targetName: String) {
+    fun openLogs(
+        serverId: String,
+        targetType: LogTargetType,
+        targetName: String,
+        lines: Int = _detailOps.value.logLinesCount
+    ) {
         viewModelScope.launch {
             val title = if (targetType == LogTargetType.SYSTEM_JOURNAL) "系统日志" else targetName
             _detailOps.value = _detailOps.value.copy(
+                logServerId = serverId,
+                logTargetType = targetType,
+                logTargetName = targetName,
+                logLinesCount = lines,
                 logTitle = title,
                 logLines = emptyList(),
+                logError = null,
                 isLogsOpen = true,
                 isLoadingLogs = true
             )
             val cfg = repo.getServerById(serverId)
             if (cfg == null) {
-                _detailOps.value = _detailOps.value.copy(isLoadingLogs = false, logLines = listOf("未找到服务器配置"))
+                _detailOps.value = _detailOps.value.copy(
+                    isLoadingLogs = false,
+                    logError = "未找到服务器配置"
+                )
                 return@launch
             }
-            repo.fetchLogs(cfg, targetType, targetName, lines = 150).fold(
-                onSuccess = { lines ->
+            repo.fetchLogs(cfg, targetType, targetName, lines = lines).fold(
+                onSuccess = { outLines ->
                     _detailOps.value = _detailOps.value.copy(
                         isLoadingLogs = false,
-                        logLines = if (lines.isEmpty()) listOf("暂无日志输出") else lines
+                        logError = null,
+                        logLines = if (outLines.isEmpty()) listOf("暂无日志输出") else outLines
                     )
                 },
                 onFailure = { e ->
                     val err = ErrorMapper.toUserFacingError(e)
                     _detailOps.value = _detailOps.value.copy(
                         isLoadingLogs = false,
-                        logLines = listOf("${err.title}：${err.message}")
+                        logError = "${err.title}：${err.message}"
                     )
                 }
             )
+        }
+    }
+
+    fun refreshOpenLogs(lines: Int = _detailOps.value.logLinesCount) {
+        val current = _detailOps.value
+        if (current.logServerId.isNotBlank()) {
+            openLogs(current.logServerId, current.logTargetType, current.logTargetName, lines)
         }
     }
 
@@ -192,11 +232,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun restartTarget(serverId: String, targetType: LogTargetType, targetName: String) {
+        performWorkloadAction(serverId, targetType, targetName, WorkloadAction.RESTART)
+    }
+
+    fun performWorkloadAction(
+        serverId: String,
+        targetType: LogTargetType,
+        targetName: String,
+        action: WorkloadAction
+    ) {
         viewModelScope.launch {
             _detailOps.value = _detailOps.value.copy(isActionPending = true)
             val cfg = repo.getServerById(serverId)
             if (cfg != null) {
-                repo.restartTarget(cfg, targetType, targetName).fold(
+                repo.performWorkloadAction(cfg, targetType, targetName, action).fold(
                     onSuccess = { msg -> _snackbarEvents.emit(msg) },
                     onFailure = { e ->
                         val err = ErrorMapper.toUserFacingError(e)
@@ -267,6 +316,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repo.saveAlertRule(rule)
             _snackbarEvents.emit("告警阈值已更新")
         }
+    }
+
+    fun deleteAlertRule(ruleId: String) {
+        viewModelScope.launch {
+            repo.deleteAlertRule(ruleId)
+            _snackbarEvents.emit("已恢复全局默认阈值")
+        }
+    }
+
+    fun setPinned(serverId: String, pinned: Boolean) {
+        viewModelScope.launch {
+            repo.setPinned(serverId, pinned)
+            _snackbarEvents.emit(if (pinned) "已置顶该服务器" else "已取消置顶")
+        }
+    }
+
+    fun setEnabled(serverId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            repo.setEnabled(serverId, enabled)
+            _snackbarEvents.emit(if (enabled) "已恢复轮询采集" else "已暂停该节点采集")
+        }
+    }
+
+    fun trustFingerprint(serverId: String, fingerprint: String) {
+        viewModelScope.launch {
+            repo.trustFingerprint(serverId, fingerprint)
+            _snackbarEvents.emit("已更新信任的主机指纹")
+            performRefreshCycle()
+        }
+    }
+
+    suspend fun exportBackupJson(includeSecrets: Boolean, passphrase: String?): String =
+        repo.exportBackupJson(includeSecrets, passphrase)
+
+    suspend fun importBackupJson(rawJson: String, passphrase: String?): Result<Pair<Int, Int>> {
+        val result = repo.importBackupJson(rawJson, passphrase)
+        if (result.isSuccess) {
+            performRefreshCycle()
+        }
+        return result
     }
 
     fun acknowledgeAlert(id: String) {

@@ -9,6 +9,7 @@ import com.xiaogou.serverseyes.core.model.MetricSource
 import com.xiaogou.serverseyes.core.model.ProcessSummary
 import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.SystemServiceInfo
+import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.parser.AgentAuthException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -213,16 +214,24 @@ class AgentApiClient(
         token: String,
         targetType: LogTargetType,
         targetName: String
+    ): Result<String> = performWorkloadAction(baseUrl, token, targetType, targetName, WorkloadAction.RESTART)
+
+    suspend fun performWorkloadAction(
+        baseUrl: String,
+        token: String,
+        targetType: LogTargetType,
+        targetName: String,
+        action: WorkloadAction
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val typeStr = when (targetType) {
                 LogTargetType.DOCKER_CONTAINER -> "docker"
                 LogTargetType.SYSTEMD_SERVICE -> "systemd"
-                LogTargetType.SYSTEM_JOURNAL -> error("系统日志不支持重启")
+                LogTargetType.SYSTEM_JOURNAL -> error("系统日志不支持启停或重启")
             }
             val payload = json.encodeToString(
                 AgentActionRequestDto(
-                    action = "restart",
+                    action = action.apiValue,
                     targetType = typeStr,
                     targetName = targetName
                 )
@@ -240,7 +249,7 @@ class AgentApiClient(
                 }
                 val dto = json.decodeFromString<AgentActionResponseDto>(body)
                 if (!dto.ok) error(dto.message.ifBlank { "执行失败" })
-                dto.message.ifBlank { "已重启 $targetName" }
+                dto.message.ifBlank { "已${action.label} $targetName" }
             }
         }
     }

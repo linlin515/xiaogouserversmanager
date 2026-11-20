@@ -1,5 +1,6 @@
 package com.xiaogou.serverseyes.data.repository
 
+import com.xiaogou.serverseyes.core.backup.ConfigBackupManager
 import com.xiaogou.serverseyes.core.model.AlertEvent
 import com.xiaogou.serverseyes.core.model.AlertMetricType
 import com.xiaogou.serverseyes.core.model.AlertRule
@@ -15,6 +16,7 @@ import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.ServerStatus
 import com.xiaogou.serverseyes.core.model.SshAuthType
 import com.xiaogou.serverseyes.core.model.UserFacingError
+import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.network.AgentApiClient
 import com.xiaogou.serverseyes.core.parser.ErrorMapper
 import com.xiaogou.serverseyes.core.security.CryptoManager
@@ -173,8 +175,47 @@ class ServerRepository(
         sshClient.invalidateSession(serverId)
     }
 
+    suspend fun setPinned(serverId: String, pinned: Boolean) {
+        serverDao.updatePinned(serverId, pinned)
+    }
+
+    suspend fun setEnabled(serverId: String, enabled: Boolean) {
+        serverDao.updateEnabled(serverId, enabled)
+        if (!enabled) {
+            sshClient.invalidateSession(serverId)
+        }
+    }
+
     suspend fun saveAlertRule(rule: AlertRule) {
         alertRuleDao.upsert(rule.toEntity())
+    }
+
+    suspend fun deleteAlertRule(ruleId: String) {
+        alertRuleDao.deleteById(ruleId)
+    }
+
+    suspend fun exportBackupJson(includeSecrets: Boolean, passphrase: String?): String {
+        val allServers = serverDao.getAll().map { it.toDomain() }
+        val allRules = alertRuleDao.getAll().map { it.toDomain() }
+        return ConfigBackupManager.exportJson(
+            servers = allServers,
+            alertRules = allRules,
+            includeSecrets = includeSecrets,
+            passphrase = passphrase
+        )
+    }
+
+    suspend fun importBackupJson(rawJson: String, passphrase: String?): Result<Pair<Int, Int>> {
+        return ConfigBackupManager.importJson(rawJson, passphrase).map { data ->
+            data.servers.forEach { srv ->
+                serverDao.upsert(srv.toEntity())
+                sshClient.invalidateSession(srv.id)
+            }
+            data.alertRules.forEach { rule ->
+                alertRuleDao.upsert(rule.toEntity())
+            }
+            data.servers.size to data.alertRules.size
+        }
     }
 
     suspend fun acknowledgeAlert(eventId: String) {
@@ -200,8 +241,8 @@ class ServerRepository(
                 }
             }
         }.awaitAll()
-        // Keep last 24h local samples
-        val cutoff = System.currentTimeMillis() - 24 * 60 * 60_000L
+        // Keep last 48h local samples to support 24h / 48h views
+        val cutoff = System.currentTimeMillis() - 48 * 60 * 60_000L
         sampleDao.pruneOlderThan(cutoff)
     }
 
@@ -448,16 +489,29 @@ class ServerRepository(
         config: ServerConfig,
         targetType: LogTargetType,
         targetName: String
+    ): Result<String> = performWorkloadAction(config, targetType, targetName, WorkloadAction.RESTART)
+
+    suspend fun performWorkloadAction(
+        config: ServerConfig,
+        targetType: LogTargetType,
+        targetName: String,
+        action: WorkloadAction
     ): Result<String> {
         val result = if (config.collectionMode != CollectionMode.SSH_ONLY && config.agentUrl.isNotBlank()) {
-            val agentRes = agentClient.restartTarget(config.agentUrl, config.agentToken, targetType, targetName)
+            val agentRes = agentClient.performWorkloadAction(
+                config.agentUrl,
+                config.agentToken,
+                targetType,
+                targetName,
+                action
+            )
             if (agentRes.isSuccess || config.collectionMode == CollectionMode.AGENT_ONLY) {
                 agentRes
             } else {
-                sshClient.restartTarget(config, targetType, targetName)
+                sshClient.performWorkloadAction(config, targetType, targetName, action)
             }
         } else {
-            sshClient.restartTarget(config, targetType, targetName)
+            sshClient.performWorkloadAction(config, targetType, targetName, action)
         }
         if (result.isSuccess) {
             refreshSingleServer(config)

@@ -61,6 +61,17 @@ class AgentUnitTest(unittest.TestCase):
                 with urllib.request.urlopen(req_hist, timeout=5) as resp:
                     hist = json.loads(resp.read().decode("utf-8"))
                     self.assertGreaterEqual(len(hist["points"]), 1)
+
+                # 4. Actions disabled by default -> 403
+                req_action = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/v1/action",
+                    data=json.dumps({"action": "start", "targetType": "docker", "targetName": "web"}).encode("utf-8"),
+                    headers={"Authorization": "Bearer test-secret", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx_act:
+                    urllib.request.urlopen(req_action, timeout=5)
+                self.assertEqual(ctx_act.exception.code, 403)
             finally:
                 server.shutdown()
                 server.server_close()
