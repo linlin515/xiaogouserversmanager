@@ -29,21 +29,22 @@ class MonitoringWorker(
     companion object {
         private const val UNIQUE_WORK_NAME = "xiaogou_server_periodic_monitor"
 
-        fun schedule(context: Context, enabled: Boolean) {
+        fun schedule(context: Context, enabled: Boolean, intervalMinutes: Int = 15, forceUpdate: Boolean = false) {
             val wm = WorkManager.getInstance(context)
             if (!enabled) {
                 wm.cancelUniqueWork(UNIQUE_WORK_NAME)
                 return
             }
+            val safeMinutes = intervalMinutes.coerceIn(15, 720).toLong()
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
-            val request = PeriodicWorkRequestBuilder<MonitoringWorker>(15, TimeUnit.MINUTES)
+            val request = PeriodicWorkRequestBuilder<MonitoringWorker>(safeMinutes, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .build()
             wm.enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                if (forceUpdate) ExistingPeriodicWorkPolicy.UPDATE else ExistingPeriodicWorkPolicy.KEEP,
                 request
             )
         }

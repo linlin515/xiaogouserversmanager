@@ -1,5 +1,7 @@
 package com.xiaogou.serverseyes.data.repository
 
+import com.xiaogou.serverseyes.core.backup.BackupImportStrategy
+import com.xiaogou.serverseyes.core.backup.BackupPreview
 import com.xiaogou.serverseyes.core.backup.ConfigBackupManager
 import com.xiaogou.serverseyes.core.model.AlertEvent
 import com.xiaogou.serverseyes.core.model.AlertMetricType
@@ -7,6 +9,7 @@ import com.xiaogou.serverseyes.core.model.AlertRule
 import com.xiaogou.serverseyes.core.model.AlertSeverity
 import com.xiaogou.serverseyes.core.model.CollectionMode
 import com.xiaogou.serverseyes.core.model.CpuJiffies
+import com.xiaogou.serverseyes.core.model.DiskIoSectors
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.MetricPoint
 import com.xiaogou.serverseyes.core.model.MetricSource
@@ -22,6 +25,7 @@ import com.xiaogou.serverseyes.core.parser.ErrorMapper
 import com.xiaogou.serverseyes.core.security.CryptoManager
 import com.xiaogou.serverseyes.core.ssh.SshClientManager
 import com.xiaogou.serverseyes.data.alert.AlertEvaluator
+import com.xiaogou.serverseyes.data.alert.DndSchedule
 import com.xiaogou.serverseyes.data.local.AlertEventDao
 import com.xiaogou.serverseyes.data.local.AlertEventEntity
 import com.xiaogou.serverseyes.data.local.AlertRuleDao
@@ -52,8 +56,16 @@ data class ServerRuntimeData(
     val recentSparklineCpu: List<Double> = emptyList(),
     val isRefreshing: Boolean = false,
     val consecutiveFailures: Int = 0,
+    val nextRetryAtMs: Long = 0L,
     val lastError: UserFacingError? = null,
     val lastUpdatedMs: Long = 0L
+)
+
+data class BackupImportSummary(
+    val serverCount: Int,
+    val ruleCount: Int,
+    val eventCount: Int,
+    val sampleCount: Int
 )
 
 data class ServerUiModel(
@@ -88,11 +100,13 @@ class ServerRepository(
     private val cryptoManager: CryptoManager,
     private val sshClient: SshClientManager,
     private val agentClient: AgentApiClient,
-    private val alertNotifier: AlertNotifier
+    private val alertNotifier: AlertNotifier,
+    private val runInTransaction: suspend (suspend () -> Unit) -> Unit = { block -> block() }
 ) {
     private val runtimeMap = MutableStateFlow<Map<String, ServerRuntimeData>>(emptyMap())
     private val prevCpuMap = ConcurrentHashMap<String, CpuJiffies>()
     private val prevNetMap = ConcurrentHashMap<String, NetBytes>()
+    private val prevDiskMap = ConcurrentHashMap<String, DiskIoSectors>()
     private val pollSemaphore = Semaphore(6)
 
     suspend fun ensureDefaultAlertRules() {
@@ -167,6 +181,9 @@ class ServerRepository(
         sshClient.invalidateSession(serverId)
         serverDao.deleteById(serverId)
         sampleDao.deleteForServer(serverId)
+        alertEventDao.deleteForServer(serverId)
+        alertRuleDao.deleteForServer(serverId)
+        AlertMetricType.entries.forEach { alertNotifier.cancelActiveAlert(serverId, it) }
         runtimeMap.update { it - serverId }
     }
 
@@ -186,6 +203,37 @@ class ServerRepository(
         }
     }
 
+    suspend fun batchSetPinned(serverIds: Set<String>, pinned: Boolean) {
+        runInTransaction {
+            serverIds.forEach { serverDao.updatePinned(it, pinned) }
+        }
+    }
+
+    suspend fun batchSetEnabled(serverIds: Set<String>, enabled: Boolean) {
+        runInTransaction {
+            serverIds.forEach { serverDao.updateEnabled(it, enabled) }
+        }
+        if (!enabled) {
+            serverIds.forEach { sshClient.invalidateSession(it) }
+        }
+    }
+
+    suspend fun batchDeleteServers(serverIds: Set<String>) {
+        runInTransaction {
+            serverIds.forEach { id ->
+                serverDao.deleteById(id)
+                sampleDao.deleteForServer(id)
+                alertEventDao.deleteForServer(id)
+                alertRuleDao.deleteForServer(id)
+            }
+        }
+        serverIds.forEach { id ->
+            sshClient.invalidateSession(id)
+            AlertMetricType.entries.forEach { alertNotifier.cancelActiveAlert(id, it) }
+        }
+        runtimeMap.update { it - serverIds }
+    }
+
     suspend fun saveAlertRule(rule: AlertRule) {
         alertRuleDao.upsert(rule.toEntity())
     }
@@ -194,27 +242,86 @@ class ServerRepository(
         alertRuleDao.deleteById(ruleId)
     }
 
-    suspend fun exportBackupJson(includeSecrets: Boolean, passphrase: String?): String {
+    suspend fun exportBackupJson(
+        includeSecrets: Boolean,
+        passphrase: String?,
+        includeHistory: Boolean = false
+    ): String {
         val allServers = serverDao.getAll().map { it.toDomain() }
         val allRules = alertRuleDao.getAll().map { it.toDomain() }
+        val events = if (includeHistory) alertEventDao.getAllVisible().map { it.toDomain() } else emptyList()
+        val samples = if (includeHistory) {
+            val since = System.currentTimeMillis() - 48L * 60 * 60_000L
+            sampleDao.getAllSince(since)
+        } else {
+            emptyList()
+        }
         return ConfigBackupManager.exportJson(
             servers = allServers,
             alertRules = allRules,
             includeSecrets = includeSecrets,
-            passphrase = passphrase
+            passphrase = passphrase,
+            alertEvents = events,
+            metricSamples = samples
         )
     }
 
+    fun previewBackupJson(rawJson: String, passphrase: String?): Result<BackupPreview> {
+        return ConfigBackupManager.previewJson(rawJson, passphrase)
+    }
+
     suspend fun importBackupJson(rawJson: String, passphrase: String?): Result<Pair<Int, Int>> {
-        return ConfigBackupManager.importJson(rawJson, passphrase).map { data ->
-            data.servers.forEach { srv ->
-                serverDao.upsert(srv.toEntity())
-                sshClient.invalidateSession(srv.id)
+        return importBackup(rawJson, passphrase, BackupImportStrategy.MERGE, includeHistory = true)
+            .map { it.serverCount to it.ruleCount }
+    }
+
+    suspend fun importBackup(
+        rawJson: String,
+        passphrase: String?,
+        strategy: BackupImportStrategy = BackupImportStrategy.MERGE,
+        includeHistory: Boolean = true
+    ): Result<BackupImportSummary> {
+        return ConfigBackupManager.importJson(rawJson, passphrase).mapCatching { data ->
+            val previousIds = if (strategy == BackupImportStrategy.REPLACE) {
+                serverDao.getAll().map { it.id }
+            } else {
+                emptyList()
             }
-            data.alertRules.forEach { rule ->
-                alertRuleDao.upsert(rule.toEntity())
+            runInTransaction {
+                if (strategy == BackupImportStrategy.REPLACE) {
+                    serverDao.deleteAll()
+                    sampleDao.deleteAll()
+                    alertRuleDao.deleteAll()
+                    alertEventDao.clearAllHard()
+                }
+                data.servers.forEach { srv ->
+                    serverDao.upsert(srv.toEntity())
+                }
+                data.alertRules.forEach { rule ->
+                    alertRuleDao.upsert(rule.toEntity())
+                }
+                alertRuleDao.insertIfAbsent(AppDatabase.DEFAULT_RULES)
+                if (includeHistory) {
+                    if (data.alertEvents.isNotEmpty()) {
+                        alertEventDao.insertAllIgnore(data.alertEvents.map { it.toEntity() })
+                    }
+                    if (data.metricSamples.isNotEmpty()) {
+                        sampleDao.insertAllIgnore(data.metricSamples)
+                    }
+                }
             }
-            data.servers.size to data.alertRules.size
+            previousIds.forEach { sshClient.invalidateSession(it) }
+            data.servers.forEach { sshClient.invalidateSession(it.id) }
+            if (strategy == BackupImportStrategy.REPLACE) {
+                val importedIds = data.servers.map { it.id }.toSet()
+                runtimeMap.update { current -> current.filterKeys { it in importedIds } }
+            }
+            BackupImportSummary(
+                serverCount = data.servers.size,
+                ruleCount = data.alertRules.size,
+                eventCount = if (includeHistory) data.alertEvents.size else 0,
+                sampleCount = if (includeHistory) data.metricSamples.size else 0
+            )
         }
     }
 
@@ -227,23 +334,38 @@ class ServerRepository(
     }
 
     suspend fun clearAlerts() {
-        alertEventDao.clearAll()
+        // Soft-hide visible events so cooldown anchors and unresolved recovery tracking remain intact
+        alertEventDao.softClearAll()
     }
 
-    suspend fun refreshAllServers() = coroutineScope {
+    suspend fun refreshAllServers(force: Boolean = false) = coroutineScope {
         ensureDefaultAlertRules()
         val servers = serverDao.getAll().filter { it.enabled }.map { it.toDomain() }
         if (servers.isEmpty()) return@coroutineScope
-        servers.map { config ->
-            async {
-                pollSemaphore.withPermit {
-                    refreshSingleServer(config)
-                }
+        val now = System.currentTimeMillis()
+        val currentRuntime = runtimeMap.value
+        val targets = if (force) {
+            servers
+        } else {
+            servers.filter { cfg ->
+                val nextRetry = currentRuntime[cfg.id]?.nextRetryAtMs ?: 0L
+                nextRetry <= now
             }
-        }.awaitAll()
-        // Keep last 48h local samples to support 24h / 48h views
-        val cutoff = System.currentTimeMillis() - 48 * 60 * 60_000L
-        sampleDao.pruneOlderThan(cutoff)
+        }
+        if (targets.isNotEmpty()) {
+            targets.map { config ->
+                async {
+                    pollSemaphore.withPermit {
+                        refreshSingleServer(config)
+                    }
+                }
+            }.awaitAll()
+        }
+        // Keep last 48h local samples and 30d alert events
+        val sampleCutoff = System.currentTimeMillis() - 48L * 60 * 60_000L
+        sampleDao.pruneOlderThan(sampleCutoff)
+        val alertCutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L
+        alertEventDao.pruneOlderThan(alertCutoff)
     }
 
     suspend fun refreshServer(serverId: String) {
@@ -267,6 +389,7 @@ class ServerRepository(
             onSuccess = { snapshot ->
                 snapshot.rawCpuJiffies?.let { prevCpuMap[config.id] = it }
                 snapshot.rawNetBytes?.let { prevNetMap[config.id] = it }
+                snapshot.rawDiskSectors?.let { prevDiskMap[config.id] = it }
 
                 sampleDao.insert(
                     MetricSampleEntity(
@@ -297,9 +420,35 @@ class ServerRepository(
                             recentSparklineCpu = spark,
                             isRefreshing = false,
                             consecutiveFailures = 0,
+                            nextRetryAtMs = 0L,
                             lastError = null,
                             lastUpdatedMs = snapshot.timestampMs
                         )
+                    )
+                }
+
+                // Evaluate recoveries for previously unresolved alerts
+                val activeMetrics = mutableSetOf<AlertMetricType>()
+                AlertMetricType.entries.forEach { type ->
+                    if (alertEventDao.getActiveUnresolvedFor(config.id, type.name).isNotEmpty()) {
+                        activeMetrics += type
+                    }
+                }
+                val recoveries = AlertEvaluator.evaluateRecoveries(
+                    serverId = config.id,
+                    serverName = config.name,
+                    snapshot = snapshot,
+                    rules = serverRules,
+                    activeUnresolvedMetrics = activeMetrics
+                )
+                recoveries.forEach { rec ->
+                    alertEventDao.markResolvedFor(config.id, rec.metricType.name, now)
+                    alertNotifier.notifyResolved(
+                        serverId = config.id,
+                        serverName = rec.serverName,
+                        metricType = rec.metricType,
+                        message = rec.message,
+                        sendRecoveryBanner = DndSchedule.shouldSendRecoveryNotification(settings)
                     )
                 }
 
@@ -319,7 +468,7 @@ class ServerRepository(
                 )
                 newEvents.forEach { ev ->
                     alertEventDao.insert(ev.toEntity())
-                    if (settings.notificationsEnabled) {
+                    if (DndSchedule.shouldSendAlertNotification(settings, ev.severity)) {
                         alertNotifier.notifyAlert(ev)
                     }
                 }
@@ -327,13 +476,16 @@ class ServerRepository(
             onFailure = { throwable ->
                 val userErr = ErrorMapper.toUserFacingError(throwable)
                 var failures = 1
+                val basePollMs = settings.pollIntervalSeconds.coerceAtLeast(3) * 1000L
                 runtimeMap.update { current ->
                     val old = current[config.id] ?: ServerRuntimeData()
                     failures = old.consecutiveFailures + 1
+                    val backoffMs = minOf(300_000L, basePollMs * (1L shl (failures - 1).coerceAtMost(5)))
                     current + (
                         config.id to old.copy(
                             isRefreshing = false,
                             consecutiveFailures = failures,
+                            nextRetryAtMs = now + backoffMs,
                             lastError = userErr
                         )
                     )
@@ -349,7 +501,7 @@ class ServerRepository(
                 )
                 if (offlineEv != null) {
                     alertEventDao.insert(offlineEv.toEntity())
-                    if (settings.notificationsEnabled) {
+                    if (DndSchedule.shouldSendAlertNotification(settings, offlineEv.severity)) {
                         alertNotifier.notifyAlert(offlineEv)
                     }
                 }
@@ -363,7 +515,7 @@ class ServerRepository(
                 agentClient.fetchSnapshot(config.id, config.agentUrl, config.agentToken)
             }
             CollectionMode.SSH_ONLY -> {
-                sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id])
+                sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id], prevDiskMap[config.id])
             }
             CollectionMode.HYBRID -> {
                 if (config.agentUrl.isNotBlank()) {
@@ -371,11 +523,11 @@ class ServerRepository(
                     if (agentResult.isSuccess) return agentResult
                     // If SSH is also configured, silently fallback to SSH
                     if (config.host.isNotBlank() && config.sshUsername.isNotBlank()) {
-                        return sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id])
+                        return sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id], prevDiskMap[config.id])
                     }
                     agentResult
                 } else {
-                    sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id])
+                    sshClient.collectSnapshot(config, prevCpuMap[config.id], prevNetMap[config.id], prevDiskMap[config.id])
                 }
             }
         }
@@ -540,6 +692,15 @@ class ServerRepository(
         sshPrivateKey = runCatching { cryptoManager.decrypt(encryptedSshPrivateKey) }.getOrDefault(""),
         sshKeyPassphrase = runCatching { cryptoManager.decrypt(encryptedSshKeyPassphrase) }.getOrDefault(""),
         trustedHostFingerprint = trustedHostFingerprint,
+        timeoutSeconds = timeoutSeconds.coerceIn(3, 60),
+        jumpHostEnabled = jumpHostEnabled,
+        jumpHost = jumpHost,
+        jumpPort = jumpPort.coerceIn(1, 65535),
+        jumpUsername = jumpUsername.ifBlank { "root" },
+        jumpAuthType = runCatching { SshAuthType.valueOf(jumpAuthType) }.getOrDefault(SshAuthType.PASSWORD),
+        jumpPassword = runCatching { cryptoManager.decrypt(encryptedJumpPassword) }.getOrDefault(""),
+        jumpPrivateKey = runCatching { cryptoManager.decrypt(encryptedJumpPrivateKey) }.getOrDefault(""),
+        jumpKeyPassphrase = runCatching { cryptoManager.decrypt(encryptedJumpKeyPassphrase) }.getOrDefault(""),
         agentUrl = agentUrl,
         agentToken = runCatching { cryptoManager.decrypt(encryptedAgentToken) }.getOrDefault(""),
         sortOrder = sortOrder,
@@ -560,6 +721,15 @@ class ServerRepository(
         encryptedSshPrivateKey = cryptoManager.encrypt(sshPrivateKey),
         encryptedSshKeyPassphrase = cryptoManager.encrypt(sshKeyPassphrase),
         trustedHostFingerprint = trustedHostFingerprint,
+        timeoutSeconds = timeoutSeconds.coerceIn(3, 60),
+        jumpHostEnabled = jumpHostEnabled,
+        jumpHost = jumpHost,
+        jumpPort = jumpPort.coerceIn(1, 65535),
+        jumpUsername = jumpUsername,
+        jumpAuthType = jumpAuthType.name,
+        encryptedJumpPassword = cryptoManager.encrypt(jumpPassword),
+        encryptedJumpPrivateKey = cryptoManager.encrypt(jumpPrivateKey),
+        encryptedJumpKeyPassphrase = cryptoManager.encrypt(jumpKeyPassphrase),
         agentUrl = agentUrl,
         encryptedAgentToken = cryptoManager.encrypt(agentToken),
         sortOrder = sortOrder,
@@ -597,7 +767,9 @@ class ServerRepository(
         thresholdValue = thresholdValue,
         message = message,
         timestampMs = timestampMs,
-        acknowledged = acknowledged
+        acknowledged = acknowledged,
+        isResolved = isResolved,
+        resolvedAtMs = resolvedAtMs
     )
 
     private fun AlertEvent.toEntity(): AlertEventEntity = AlertEventEntity(
@@ -610,6 +782,8 @@ class ServerRepository(
         thresholdValue = thresholdValue,
         message = message,
         timestampMs = timestampMs,
-        acknowledged = acknowledged
+        acknowledged = acknowledged,
+        isResolved = isResolved,
+        resolvedAtMs = resolvedAtMs
     )
 }

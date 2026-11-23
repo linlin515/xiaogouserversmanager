@@ -443,11 +443,16 @@ fun ServersEyesApp(vm: MainViewModel) {
                                                 isInitialLoading = isInitialLoading,
                                                 groupFilter = groupFilter,
                                                 searchQuery = searchQuery,
+                                                sortOption = settings.sortOption,
                                                 selectedServerId = selectedServerId,
                                                 onSelectFilter = { vm.selectGroupFilter(it) },
                                                 onSearchQueryChange = { vm.setSearchQuery(it) },
+                                                onSelectSort = { vm.setSortOption(it) },
                                                 onSelectServer = { id -> vm.selectServer(id) },
                                                 onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                                onBatchPin = { ids, pinned -> vm.batchSetPinned(ids, pinned) },
+                                                onBatchEnable = { ids, en -> vm.batchSetEnabled(ids, en) },
+                                                onBatchDelete = { ids -> vm.batchDeleteServers(ids) },
                                                 onAddServer = { setRoute(ActiveRoute.Editor(null)) },
                                                 onRetryAll = { vm.refreshNow() },
                                                 modifier = Modifier.weight(1.05f).fillMaxHeight()
@@ -480,14 +485,19 @@ fun ServersEyesApp(vm: MainViewModel) {
                                             isInitialLoading = isInitialLoading,
                                             groupFilter = groupFilter,
                                             searchQuery = searchQuery,
+                                            sortOption = settings.sortOption,
                                             selectedServerId = selectedServerId,
                                             onSelectFilter = { vm.selectGroupFilter(it) },
                                             onSearchQueryChange = { vm.setSearchQuery(it) },
+                                            onSelectSort = { vm.setSortOption(it) },
                                             onSelectServer = { id ->
                                                 vm.selectServer(id)
                                                 setRoute(ActiveRoute.Detail(id))
                                             },
                                             onTogglePin = { id, pinned -> vm.setPinned(id, pinned) },
+                                            onBatchPin = { ids, pinned -> vm.batchSetPinned(ids, pinned) },
+                                            onBatchEnable = { ids, en -> vm.batchSetEnabled(ids, en) },
+                                            onBatchDelete = { ids -> vm.batchDeleteServers(ids) },
                                             onAddServer = { setRoute(ActiveRoute.Editor(null)) },
                                             onRetryAll = { vm.refreshNow() }
                                         )
@@ -519,14 +529,20 @@ fun ServersEyesApp(vm: MainViewModel) {
                                         onSetTheme = { vm.setThemePreference(it) },
                                         onSetPollInterval = { vm.setPollIntervalSeconds(it) },
                                         onSetBackgroundWork = { vm.setBackgroundWorkEnabled(it) },
+                                        onSetBackgroundInterval = { vm.setBackgroundIntervalMinutes(it) },
                                         onSetForegroundService = { vm.setForegroundServiceEnabled(it) },
                                         onSetNotifications = { vm.setNotificationsEnabled(it) },
+                                        onSetNotifyOnRecovery = { vm.setNotifyOnRecovery(it) },
+                                        onSetDndConfig = { en, s, e, crit -> vm.setDndConfig(en, s, e, crit) },
                                         onClearCache = { vm.clearLocalCache() },
-                                        onExportBackup = { includeSecrets, pass ->
-                                            vm.exportBackupJson(includeSecrets, pass)
+                                        onExportBackup = { includeSecrets, pass, includeHist ->
+                                            vm.exportBackupJson(includeSecrets, pass, includeHist)
                                         },
-                                        onImportBackup = { json, pass ->
-                                            vm.importBackupJson(json, pass)
+                                        onPreviewBackup = { json, pass ->
+                                            vm.previewBackupJson(json, pass)
+                                        },
+                                        onImportBackup = { json, pass, strategy, includeHist ->
+                                            vm.importBackup(json, pass, strategy, includeHist)
                                         }
                                     )
                                 }

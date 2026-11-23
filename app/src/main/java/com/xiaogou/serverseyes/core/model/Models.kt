@@ -57,6 +57,15 @@ enum class ThemePreference {
     DARK
 }
 
+enum class ServerSortOption(val label: String) {
+    DEFAULT("默认（置顶+异常）"),
+    CPU_DESC("CPU 使用率最高"),
+    MEM_DESC("内存使用率最高"),
+    NET_TX_DESC("网络下行最高"),
+    LATENCY_ASC("响应最快"),
+    NAME_ASC("名称字母序")
+}
+
 data class ServerConfig(
     val id: String,
     val name: String,
@@ -70,6 +79,15 @@ data class ServerConfig(
     val sshPrivateKey: String = "",
     val sshKeyPassphrase: String = "",
     val trustedHostFingerprint: String? = null,
+    val timeoutSeconds: Int = 10,
+    val jumpHostEnabled: Boolean = false,
+    val jumpHost: String = "",
+    val jumpPort: Int = 22,
+    val jumpUsername: String = "root",
+    val jumpAuthType: SshAuthType = SshAuthType.PASSWORD,
+    val jumpPassword: String = "",
+    val jumpPrivateKey: String = "",
+    val jumpKeyPassphrase: String = "",
     val agentUrl: String = "",
     val agentToken: String = "",
     val sortOrder: Int = 0,
@@ -120,6 +138,26 @@ data class NetBytes(
     }
 }
 
+data class DiskIoSectors(
+    val timestampMs: Long,
+    val readSectors: Long,
+    val writeSectors: Long
+) {
+    companion object {
+        private const val SECTOR_BYTES = 512L
+
+        fun computeRates(prev: DiskIoSectors?, curr: DiskIoSectors?): Pair<Long, Long> {
+            if (prev == null || curr == null) return 0L to 0L
+            val elapsedMs = (curr.timestampMs - prev.timestampMs).coerceAtLeast(1L)
+            val readDelta = (curr.readSectors - prev.readSectors).coerceAtLeast(0L)
+            val writeDelta = (curr.writeSectors - prev.writeSectors).coerceAtLeast(0L)
+            val readPerSec = (readDelta * SECTOR_BYTES * 1000.0 / elapsedMs).toLong()
+            val writePerSec = (writeDelta * SECTOR_BYTES * 1000.0 / elapsedMs).toLong()
+            return readPerSec to writePerSec
+        }
+    }
+}
+
 @Serializable
 data class DiskPartition(
     val filesystem: String,
@@ -127,7 +165,8 @@ data class DiskPartition(
     val totalBytes: Long,
     val usedBytes: Long,
     val availBytes: Long,
-    val usagePercent: Double
+    val usagePercent: Double,
+    val inodeUsedPercent: Double? = null
 )
 
 @Serializable
@@ -135,7 +174,10 @@ data class ProcessSummary(
     val pid: Int,
     val name: String,
     val cpuPercent: Double,
-    val memPercent: Double
+    val memPercent: Double,
+    val user: String = "",
+    val rssBytes: Long = 0L,
+    val state: String = ""
 )
 
 @Serializable
@@ -145,7 +187,10 @@ data class ContainerInfo(
     val image: String,
     val state: String,
     val statusText: String,
-    val ports: String = ""
+    val ports: String = "",
+    val cpuPercent: Double? = null,
+    val memUsageText: String = "",
+    val memPercent: Double? = null
 ) {
     val isRunning: Boolean
         get() = state.equals("running", ignoreCase = true) ||
@@ -193,12 +238,16 @@ data class ServerSnapshot(
     val disks: List<DiskPartition> = emptyList(),
     val netRxBytesPerSec: Long = 0L,
     val netTxBytesPerSec: Long = 0L,
+    val diskReadBytesPerSec: Long = 0L,
+    val diskWriteBytesPerSec: Long = 0L,
+    val cpuTempCelsius: Double? = null,
     val topProcesses: List<ProcessSummary> = emptyList(),
     val containers: List<ContainerInfo> = emptyList(),
     val services: List<SystemServiceInfo> = emptyList(),
     val ports: List<ListeningPort> = emptyList(),
     val rawCpuJiffies: CpuJiffies? = null,
-    val rawNetBytes: NetBytes? = null
+    val rawNetBytes: NetBytes? = null,
+    val rawDiskSectors: DiskIoSectors? = null
 ) {
     val memPercent: Double
         get() = if (memTotalBytes > 0L) {
@@ -239,7 +288,9 @@ data class AlertEvent(
     val thresholdValue: Double,
     val message: String,
     val timestampMs: Long,
-    val acknowledged: Boolean = false
+    val acknowledged: Boolean = false,
+    val isResolved: Boolean = false,
+    val resolvedAtMs: Long? = null
 )
 
 data class DiagnosticPreset(

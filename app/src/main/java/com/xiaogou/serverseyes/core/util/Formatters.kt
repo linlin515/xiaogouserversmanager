@@ -58,4 +58,24 @@ object Formatters {
             else -> "${diffSec / 86_400}天前"
         }
     }
+
+    fun formatMinuteOfDay(minuteOfDay: Int): String {
+        val clamped = minuteOfDay.coerceIn(0, 1439)
+        val h = clamped / 60
+        val m = clamped % 60
+        return String.format(Locale.US, "%02d:%02d", h, m)
+    }
+
+    fun formatDuration(durationMs: Long): String {
+        val totalMin = (durationMs / 60_000L).coerceAtLeast(0L)
+        return when {
+            totalMin < 1 -> "不足 1 分钟"
+            totalMin < 60 -> "${totalMin} 分钟"
+            else -> {
+                val h = totalMin / 60
+                val m = totalMin % 60
+                if (m == 0L) "${h} 小时" else "${h} 小时 ${m} 分"
+            }
+        }
+    }
 }

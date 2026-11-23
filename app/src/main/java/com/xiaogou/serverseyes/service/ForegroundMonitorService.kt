@@ -4,6 +4,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import com.xiaogou.serverseyes.ServersEyesApplication
@@ -24,8 +27,40 @@ class ForegroundMonitorService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var monitorJob: Job? = null
+    private val networkAvailable = MutableStateFlow(true)
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        registerNetworkObserver()
+    }
+
+    private fun registerNetworkObserver() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val activeCaps = cm.getNetworkCapabilities(cm.activeNetwork)
+        networkAvailable.value = activeCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                networkAvailable.value = true
+            }
+
+            override fun onLost(network: Network) {
+                val currentCaps = cm.getNetworkCapabilities(cm.activeNetwork)
+                networkAvailable.value =
+                    currentCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                networkAvailable.value =
+                    networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            }
+        }
+        networkCallback = callback
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as ServersEyesApplication
@@ -44,6 +79,16 @@ class ForegroundMonitorService : Service() {
             _isServiceRunning.value = true
             monitorJob = serviceScope.launch {
                 while (isActive) {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    if (!networkAvailable.value) {
+                        val pausedNotif = app.container.alertNotifier.buildForegroundServiceNotification(
+                            "无网络连接 · 已暂停轮询等待联网恢复"
+                        )
+                        nm.notify(AlertNotifier.FOREGROUND_NOTIFICATION_ID, pausedNotif)
+                        networkAvailable.first { it }
+                        continue
+                    }
+
                     runCatching { app.container.repository.refreshAllServers() }
                     val servers = runCatching { app.container.repository.observeServers().first() }.getOrDefault(emptyList())
                     val onlineCount = servers.count { it.snapshot != null && it.lastError == null }
@@ -53,7 +98,6 @@ class ForegroundMonitorService : Service() {
                     val updatedNotif = app.container.alertNotifier.buildForegroundServiceNotification(
                         "在线 $onlineCount/${servers.size} 台 · 异常 $alertCount 台"
                     )
-                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                     nm.notify(AlertNotifier.FOREGROUND_NOTIFICATION_ID, updatedNotif)
                     val intervalSec = app.container.settingsStore.settingsFlow.first().pollIntervalSeconds
                     delay(intervalSec * 1000L)
@@ -65,6 +109,11 @@ class ForegroundMonitorService : Service() {
 
     override fun onDestroy() {
         _isServiceRunning.value = false
+        networkCallback?.let { cb ->
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            runCatching { cm?.unregisterNetworkCallback(cb) }
+        }
+        networkCallback = null
         monitorJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()

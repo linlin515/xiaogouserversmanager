@@ -6,8 +6,55 @@ import com.xiaogou.serverseyes.core.model.AlertRule
 import com.xiaogou.serverseyes.core.model.AlertSeverity
 import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.ServerStatus
+import com.xiaogou.serverseyes.data.local.AppSettings
+import java.util.Calendar
 import java.util.UUID
 import kotlin.math.roundToInt
+
+object DndSchedule {
+    fun isInDndWindow(startMinute: Int, endMinute: Int, minuteOfDay: Int): Boolean {
+        val start = startMinute.coerceIn(0, 1439)
+        val end = endMinute.coerceIn(0, 1439)
+        val now = minuteOfDay.coerceIn(0, 1439)
+        return when {
+            start == end -> true // Full-day DND if same minute and enabled
+            start < end -> now in start until end
+            else -> now >= start || now < end // Overnight window e.g. 23:00..08:00
+        }
+    }
+
+    fun currentMinuteOfDay(nowMs: Long = System.currentTimeMillis()): Int {
+        val cal = Calendar.getInstance().apply { timeInMillis = nowMs }
+        return cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+    }
+
+    fun shouldSendAlertNotification(
+        settings: AppSettings,
+        severity: AlertSeverity,
+        minuteOfDay: Int = currentMinuteOfDay()
+    ): Boolean {
+        if (!settings.notificationsEnabled) return false
+        if (!settings.dndEnabled) return true
+        if (!isInDndWindow(settings.dndStartMinute, settings.dndEndMinute, minuteOfDay)) return true
+        return severity == AlertSeverity.CRITICAL && settings.dndAllowCritical
+    }
+
+    fun shouldSendRecoveryNotification(
+        settings: AppSettings,
+        minuteOfDay: Int = currentMinuteOfDay()
+    ): Boolean {
+        if (!settings.notificationsEnabled || !settings.notifyOnRecovery) return false
+        if (!settings.dndEnabled) return true
+        return !isInDndWindow(settings.dndStartMinute, settings.dndEndMinute, minuteOfDay)
+    }
+}
+
+data class RecoveryNotice(
+    val serverId: String,
+    val serverName: String,
+    val metricType: AlertMetricType,
+    val message: String
+)
 
 object AlertEvaluator {
 
@@ -29,8 +76,12 @@ object AlertEvaluator {
         consecutiveFailures: Int,
         rules: Map<AlertMetricType, AlertRule>
     ): ServerStatus {
-        if (consecutiveFailures > 0 || snapshot == null) {
+        if (snapshot == null) {
             return if (consecutiveFailures > 0) ServerStatus.OFFLINE else ServerStatus.UNKNOWN
+        }
+        if (consecutiveFailures > 0) {
+            val offlineGrace = (rules[AlertMetricType.OFFLINE]?.warningThreshold?.toInt() ?: 2).coerceAtLeast(1)
+            return if (consecutiveFailures >= offlineGrace) ServerStatus.OFFLINE else ServerStatus.WARNING
         }
         var worst = ServerStatus.ONLINE
 
@@ -133,5 +184,49 @@ object AlertEvaluator {
             timestampMs = nowMs,
             acknowledged = false
         )
+    }
+
+    fun evaluateRecoveries(
+        serverId: String,
+        serverName: String,
+        snapshot: ServerSnapshot,
+        rules: Map<AlertMetricType, AlertRule>,
+        activeUnresolvedMetrics: Set<AlertMetricType>,
+        hysteresis: Double = 2.0
+    ): List<RecoveryNotice> {
+        if (activeUnresolvedMetrics.isEmpty()) return emptyList()
+        val notices = mutableListOf<RecoveryNotice>()
+
+        if (AlertMetricType.OFFLINE in activeUnresolvedMetrics) {
+            notices += RecoveryNotice(
+                serverId = serverId,
+                serverName = serverName,
+                metricType = AlertMetricType.OFFLINE,
+                message = "$serverName 已恢复在线连接（延迟 ${snapshot.latencyMs}ms）"
+            )
+        }
+
+        fun checkMetricRecovery(type: AlertMetricType, value: Double, label: String) {
+            if (type !in activeUnresolvedMetrics) return
+            val rule = rules[type]
+            val recoverLine = if (rule != null) {
+                (rule.warningThreshold - hysteresis).coerceAtLeast(0.0)
+            } else {
+                Double.MAX_VALUE
+            }
+            if (value < recoverLine) {
+                notices += RecoveryNotice(
+                    serverId = serverId,
+                    serverName = serverName,
+                    metricType = type,
+                    message = "$serverName ${label}已回落至 ${value.roundToInt()}%，恢复正常"
+                )
+            }
+        }
+
+        checkMetricRecovery(AlertMetricType.CPU, snapshot.cpuPercent, "CPU 使用率")
+        checkMetricRecovery(AlertMetricType.MEMORY, snapshot.memPercent, "内存使用率")
+        checkMetricRecovery(AlertMetricType.DISK, snapshot.maxDiskPercent, "磁盘使用率")
+        return notices
     }
 }

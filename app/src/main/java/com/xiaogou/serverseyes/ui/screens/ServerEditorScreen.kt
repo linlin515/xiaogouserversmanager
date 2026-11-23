@@ -3,7 +3,13 @@ package com.xiaogou.serverseyes.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,10 +29,12 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,10 +57,11 @@ import com.xiaogou.serverseyes.core.designsystem.components.AppTextField
 import com.xiaogou.serverseyes.core.designsystem.components.ConfirmActionDialog
 import com.xiaogou.serverseyes.core.designsystem.components.PrimaryButton
 import com.xiaogou.serverseyes.core.designsystem.components.SecondaryButton
-import com.xiaogou.serverseyes.core.designsystem.primitives.StatusChipRaw
+import com.xiaogou.serverseyes.core.designsystem.primitives.AppDivider
 import com.xiaogou.serverseyes.core.designsystem.theme.AppTheme
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppRadius
 import com.xiaogou.serverseyes.core.designsystem.tokens.AppSpacing
+import com.xiaogou.serverseyes.core.designsystem.tokens.tabular
 import com.xiaogou.serverseyes.core.model.CollectionMode
 import com.xiaogou.serverseyes.core.model.ServerConfig
 import com.xiaogou.serverseyes.core.model.SshAuthType
@@ -88,6 +97,17 @@ fun ServerEditorScreen(
     var sshPrivateKey by rememberSaveable { mutableStateOf("") }
     var sshPassphrase by rememberSaveable { mutableStateOf("") }
     var trustedFingerprint by rememberSaveable { mutableStateOf<String?>(null) }
+    var timeoutSeconds by rememberSaveable { mutableIntStateOf(10) }
+
+    var jumpHostEnabled by rememberSaveable { mutableStateOf(false) }
+    var jumpHost by rememberSaveable { mutableStateOf("") }
+    var jumpPort by rememberSaveable { mutableStateOf("22") }
+    var jumpUsername by rememberSaveable { mutableStateOf("root") }
+    var jumpAuthType by rememberSaveable { mutableStateOf(SshAuthType.PASSWORD) }
+    var jumpPassword by rememberSaveable { mutableStateOf("") }
+    var jumpPrivateKey by rememberSaveable { mutableStateOf("") }
+    var jumpKeyPassphrase by rememberSaveable { mutableStateOf("") }
+
     var agentUrl by rememberSaveable { mutableStateOf("") }
     var agentToken by rememberSaveable { mutableStateOf("") }
     var isPinned by rememberSaveable { mutableStateOf(false) }
@@ -97,13 +117,66 @@ fun ServerEditorScreen(
     var nameError by rememberSaveable { mutableStateOf<String?>(null) }
     var hostError by rememberSaveable { mutableStateOf<String?>(null) }
     var portError by rememberSaveable { mutableStateOf<String?>(null) }
+    var jumpHostError by rememberSaveable { mutableStateOf<String?>(null) }
+    var jumpPortError by rememberSaveable { mutableStateOf<String?>(null) }
     var agentUrlError by rememberSaveable { mutableStateOf<String?>(null) }
 
+    var keyImportMeta by remember { mutableStateOf<String?>(null) }
+    var jumpKeyImportMeta by remember { mutableStateOf<String?>(null) }
     var isTesting by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<ConnectionTestSummary?>(null) }
     var pendingFingerprintConfirm by remember { mutableStateOf<Pair<String, String>?>(null) }
     var hostKeyChangedActual by remember { mutableStateOf<String?>(null) }
     var copiedHint by remember { mutableStateOf<String?>(null) }
+
+    fun readKeyFromUri(uri: Uri): Pair<String, String> {
+        val resolver = context.contentResolver
+        var displayName = "key_file"
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) displayName = cursor.getString(idx) ?: displayName
+            }
+        }
+        val bytes = resolver.openInputStream(uri)?.use { input ->
+            val buf = input.readBytes()
+            require(buf.size <= 131_072) { "私钥文件过大（超过 128 KB）" }
+            buf
+        } ?: error("无法读取所选私钥文件")
+        val content = String(bytes, Charsets.UTF_8).trim()
+        require(content.contains("PRIVATE KEY") || content.contains("RSA") || content.contains("OPENSSH")) {
+            "文件内容不像合法的 PEM / OpenSSH 私钥"
+        }
+        return content to "已导入：$displayName（${bytes.size} 字节）"
+    }
+
+    val targetKeyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching { readKeyFromUri(uri) }.onSuccess { (content, meta) ->
+                sshAuthType = SshAuthType.PRIVATE_KEY
+                sshPrivateKey = content
+                keyImportMeta = meta
+            }.onFailure { e ->
+                keyImportMeta = "导入失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    val jumpKeyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching { readKeyFromUri(uri) }.onSuccess { (content, meta) ->
+                jumpAuthType = SshAuthType.PRIVATE_KEY
+                jumpPrivateKey = content
+                jumpKeyImportMeta = meta
+            }.onFailure { e ->
+                jumpKeyImportMeta = "导入失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
 
     LaunchedEffect(editingServerId) {
         val existing = loadExisting(editingServerId)
@@ -120,6 +193,15 @@ fun ServerEditorScreen(
             sshPrivateKey = existing.sshPrivateKey
             sshPassphrase = existing.sshKeyPassphrase
             trustedFingerprint = existing.trustedHostFingerprint
+            timeoutSeconds = existing.timeoutSeconds
+            jumpHostEnabled = existing.jumpHostEnabled
+            jumpHost = existing.jumpHost
+            jumpPort = existing.jumpPort.toString()
+            jumpUsername = existing.jumpUsername
+            jumpAuthType = existing.jumpAuthType
+            jumpPassword = existing.jumpPassword
+            jumpPrivateKey = existing.jumpPrivateKey
+            jumpKeyPassphrase = existing.jumpKeyPassphrase
             agentUrl = existing.agentUrl
             agentToken = existing.agentToken
             isPinned = existing.isPinned
@@ -141,9 +223,12 @@ fun ServerEditorScreen(
         hostError = if (needSsh && host.isBlank()) "请输入服务器 IP 或域名" else null
         val portNum = sshPort.toIntOrNull()
         portError = if (needSsh && (portNum == null || portNum !in 1..65535)) "端口需在 1 ~ 65535 之间" else null
+        val jPortNum = jumpPort.toIntOrNull()
+        jumpHostError = if (needSsh && jumpHostEnabled && jumpHost.isBlank()) "请输入跳板机 IP 或域名" else null
+        jumpPortError = if (needSsh && jumpHostEnabled && (jPortNum == null || jPortNum !in 1..65535)) "跳板机端口需在 1 ~ 65535 之间" else null
         agentUrlError = if (needAgent && agentUrl.isBlank()) "仅 Agent 模式需要填写接口地址" else null
 
-        if (listOf(nameError, hostError, portError, agentUrlError).any { it != null }) {
+        if (listOf(nameError, hostError, portError, jumpHostError, jumpPortError, agentUrlError).any { it != null }) {
             return null
         }
         return ServerConfig(
@@ -159,6 +244,15 @@ fun ServerEditorScreen(
             sshPrivateKey = sshPrivateKey,
             sshKeyPassphrase = sshPassphrase,
             trustedHostFingerprint = trustedFingerprint,
+            timeoutSeconds = timeoutSeconds.coerceIn(3, 60),
+            jumpHostEnabled = jumpHostEnabled,
+            jumpHost = jumpHost.trim(),
+            jumpPort = jPortNum ?: 22,
+            jumpUsername = jumpUsername.trim().ifBlank { "root" },
+            jumpAuthType = jumpAuthType,
+            jumpPassword = jumpPassword,
+            jumpPrivateKey = jumpPrivateKey,
+            jumpKeyPassphrase = jumpKeyPassphrase,
             agentUrl = agentUrl.trim(),
             agentToken = agentToken.trim(),
             sortOrder = sortOrder,
@@ -177,7 +271,6 @@ fun ServerEditorScreen(
                 .padding(AppSpacing.space4),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.space3)
         ) {
-            // HostKeyChanged warning & re-trust helper
             if (hostKeyChangedActual != null) {
                 AppCard(
                     modifier = Modifier.fillMaxWidth(),
@@ -190,7 +283,7 @@ fun ServerEditorScreen(
                             Text("主机指纹变更警告（HostKeyChanged）", style = AppTheme.typography.titleSmall, color = colors.warning)
                         }
                         Text(
-                            "服务器 SSH 公钥指纹与之前保存的不一致。若服务器确已重装系统，请点击下方「重置并重新信任」，以更新指纹凭据。",
+                            "服务器 SSH 公钥指纹与之前保存的不一致。若服务器确已重装系统，请点击下方「重置并信任新指纹」，以更新指纹凭据。",
                             style = AppTheme.typography.bodySmall,
                             color = colors.textPrimary
                         )
@@ -319,6 +412,25 @@ fun ServerEditorScreen(
                                 isSecret = true
                             )
                         } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("私钥凭据", style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                                SecondaryButton(
+                                    text = "从文件导入私钥",
+                                    icon = Icons.Rounded.FileOpen,
+                                    onClick = { targetKeyLauncher.launch(arrayOf("*/*")) }
+                                )
+                            }
+                            if (keyImportMeta != null) {
+                                Text(
+                                    text = keyImportMeta!!,
+                                    style = AppTheme.typography.bodySmall,
+                                    color = if (keyImportMeta!!.startsWith("导入失败")) colors.error else colors.success
+                                )
+                            }
                             AppTextField(
                                 label = "OpenSSH / PEM 私钥内容",
                                 value = sshPrivateKey,
@@ -334,6 +446,35 @@ fun ServerEditorScreen(
                                 isSecret = true
                             )
                         }
+
+                        // Timeout picker
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("连接超时时间", style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(5, 10, 15, 30).forEach { sec ->
+                                    val active = timeoutSeconds == sec
+                                    Surface(
+                                        onClick = { timeoutSeconds = sec },
+                                        modifier = Modifier.weight(1f).heightIn(min = 38.dp),
+                                        shape = RoundedCornerShape(AppRadius.sm),
+                                        color = if (active) colors.infoSoft else colors.surfaceSubtle,
+                                        border = if (active) BorderStroke(1.dp, colors.actionPrimary) else null
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${sec}s",
+                                                style = AppTheme.typography.labelSmall.tabular(),
+                                                color = if (active) colors.actionPrimary else colors.textSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if (!trustedFingerprint.isNullOrBlank()) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -348,6 +489,112 @@ fun ServerEditorScreen(
                                 SecondaryButton(
                                     text = "重置指纹",
                                     onClick = { trustedFingerprint = null }
+                                )
+                            }
+                        }
+
+                        AppDivider()
+
+                        // JumpHost / ProxyJump section
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = AppSpacing.space2)) {
+                                Text("经由跳板机 / 堡垒机直连（ProxyJump）", style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                                Text("通过第一跳 SSH 端口转发访问内网目标主机", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                            }
+                            Switch(checked = jumpHostEnabled, onCheckedChange = { jumpHostEnabled = it })
+                        }
+
+                        if (jumpHostEnabled) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                            ) {
+                                AppTextField(
+                                    label = "跳板机 IP / 域名",
+                                    value = jumpHost,
+                                    onValueChange = { jumpHost = it; jumpHostError = null },
+                                    placeholder = "bastion.example.com",
+                                    errorText = jumpHostError,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                    modifier = Modifier.weight(2f)
+                                )
+                                AppTextField(
+                                    label = "端口",
+                                    value = jumpPort,
+                                    onValueChange = { jumpPort = it; jumpPortError = null },
+                                    errorText = jumpPortError,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            AppTextField(
+                                label = "跳板机用户名",
+                                value = jumpUsername,
+                                onValueChange = { jumpUsername = it },
+                                placeholder = "root / jump-ops"
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
+                                listOf(SshAuthType.PASSWORD to "跳板机密码", SshAuthType.PRIVATE_KEY to "跳板机私钥").forEach { (auth, label) ->
+                                    val active = jumpAuthType == auth
+                                    Surface(
+                                        onClick = { jumpAuthType = auth },
+                                        modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                                        shape = RoundedCornerShape(AppRadius.sm),
+                                        color = if (active) colors.infoSoft else colors.surfaceSubtle
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = label,
+                                                style = AppTheme.typography.labelLarge,
+                                                color = if (active) colors.actionPrimary else colors.textSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (jumpAuthType == SshAuthType.PASSWORD) {
+                                AppTextField(
+                                    label = "跳板机 SSH 密码",
+                                    value = jumpPassword,
+                                    onValueChange = { jumpPassword = it },
+                                    isSecret = true
+                                )
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("跳板机私钥", style = AppTheme.typography.labelLarge, color = colors.textPrimary)
+                                    SecondaryButton(
+                                        text = "从文件导入私钥",
+                                        icon = Icons.Rounded.FileOpen,
+                                        onClick = { jumpKeyLauncher.launch(arrayOf("*/*")) }
+                                    )
+                                }
+                                if (jumpKeyImportMeta != null) {
+                                    Text(
+                                        text = jumpKeyImportMeta!!,
+                                        style = AppTheme.typography.bodySmall,
+                                        color = if (jumpKeyImportMeta!!.startsWith("导入失败")) colors.error else colors.success
+                                    )
+                                }
+                                AppTextField(
+                                    label = "跳板机 OpenSSH / PEM 私钥内容",
+                                    value = jumpPrivateKey,
+                                    onValueChange = { jumpPrivateKey = it },
+                                    singleLine = false,
+                                    maxLines = 4
+                                )
+                                AppTextField(
+                                    label = "跳板机私钥口令（未加密可留空）",
+                                    value = jumpKeyPassphrase,
+                                    onValueChange = { jumpKeyPassphrase = it },
+                                    isSecret = true
                                 )
                             }
                         }
@@ -379,7 +626,6 @@ fun ServerEditorScreen(
                             isSecret = true
                         )
 
-                        // Deploy helper section
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("服务端 Agent 一键命令生成", style = AppTheme.typography.labelLarge, color = colors.textPrimary)
                             val tokenVal = agentToken.ifBlank { "my-secret-token" }
@@ -402,7 +648,9 @@ fun ServerEditorScreen(
                                 }
                             }
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
                             ) {
                                 SecondaryButton(
@@ -467,7 +715,11 @@ fun ServerEditorScreen(
                     loading = isTesting,
                     modifier = Modifier.weight(1f),
                     onClick = {
-                        val cfg = validateAndBuildConfig() ?: return@SecondaryButton
+                        val cfg = validateAndBuildConfig()
+                        if (cfg == null) {
+                            scope.launch { scrollState.animateScrollTo(0) }
+                            return@SecondaryButton
+                        }
                         scope.launch {
                             isTesting = true
                             val res = onTestConnection(cfg, false)

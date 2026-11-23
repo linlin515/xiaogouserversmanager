@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -47,13 +49,16 @@ fun ServerSummaryCard(
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    onTogglePin: (() -> Unit)? = null
+    onTogglePin: (() -> Unit)? = null,
+    selectionMode: Boolean = false,
+    isBatchChecked: Boolean = false
 ) {
     val colors = AppTheme.colors
     val snap = item.snapshot
     val isEnabled = item.config.enabled
 
     val borderColor = when {
+        selectionMode && isBatchChecked -> colors.actionPrimary
         isSelected -> colors.actionPrimary
         !isEnabled -> colors.border
         item.status == ServerStatus.CRITICAL || item.status == ServerStatus.OFFLINE -> colors.error
@@ -95,7 +100,14 @@ fun ServerSummaryCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    if (item.config.isPinned) {
+                    if (selectionMode) {
+                        Icon(
+                            imageVector = if (isBatchChecked) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                            contentDescription = if (isBatchChecked) "已选中" else "未选中",
+                            tint = if (isBatchChecked) colors.actionPrimary else colors.textDisabled,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else if (item.config.isPinned) {
                         Icon(
                             imageVector = Icons.Rounded.PushPin,
                             contentDescription = "已置顶",
@@ -115,7 +127,7 @@ fun ServerSummaryCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (onTogglePin != null) {
+                    if (!selectionMode && onTogglePin != null) {
                         IconButton(
                             onClick = onTogglePin,
                             modifier = Modifier.size(24.dp)
@@ -125,6 +137,19 @@ fun ServerSummaryCard(
                                 contentDescription = if (item.config.isPinned) "取消置顶" else "置顶",
                                 tint = if (item.config.isPinned) colors.actionPrimary else colors.textDisabled,
                                 modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                    if (item.config.jumpHostEnabled && item.config.jumpHost.isNotBlank()) {
+                        Surface(
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.full),
+                            color = colors.infoSoft
+                        ) {
+                            Text(
+                                text = "跳板",
+                                style = AppTheme.typography.labelSmall,
+                                color = colors.actionPrimary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }

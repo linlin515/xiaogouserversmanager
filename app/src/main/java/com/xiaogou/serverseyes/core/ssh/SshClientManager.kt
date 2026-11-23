@@ -8,12 +8,14 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
 import com.xiaogou.serverseyes.core.model.CpuJiffies
+import com.xiaogou.serverseyes.core.model.DiskIoSectors
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.NetBytes
 import com.xiaogou.serverseyes.core.model.ServerConfig
 import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.SshAuthType
 import com.xiaogou.serverseyes.core.model.WorkloadAction
+import com.xiaogou.serverseyes.core.parser.DiagnosticCommandValidator
 import com.xiaogou.serverseyes.core.parser.HostKeyMismatchException
 import com.xiaogou.serverseyes.core.parser.HostKeyUntrustedException
 import com.xiaogou.serverseyes.core.parser.LinuxMetricParser
@@ -33,9 +35,22 @@ data class SshTestResult(
     val latencyMs: Long
 )
 
+private data class SshSessionHandle(
+    val targetSession: Session,
+    val jumpSession: Session? = null
+) {
+    val isConnected: Boolean
+        get() = targetSession.isConnected && (jumpSession == null || jumpSession.isConnected)
+
+    fun disconnect() {
+        runCatching { targetSession.disconnect() }
+        runCatching { jumpSession?.disconnect() }
+    }
+}
+
 class SshClientManager {
 
-    private val sessionPool = ConcurrentHashMap<String, Session>()
+    private val sessionPool = ConcurrentHashMap<String, SshSessionHandle>()
     private val serverLocks = ConcurrentHashMap<String, Mutex>()
 
     private fun lockFor(serverId: String): Mutex =
@@ -47,9 +62,10 @@ class SshClientManager {
     ): Result<SshTestResult> = withContext(Dispatchers.IO) {
         runCatching {
             val start = System.currentTimeMillis()
-            val (session, fingerprint, keyType) = openSession(config, trustUnknownHostKey)
+            val (handle, fingerprint, keyType) = openSessionHandle(config, trustUnknownHostKey)
             try {
-                val output = execCommand(session, "hostname; uname -sr", timeoutMs = 10_000)
+                val cmdTimeout = (config.timeoutSeconds.coerceIn(3, 60) * 1000).coerceAtLeast(10_000)
+                val output = execCommand(handle.targetSession, "hostname; uname -sr", timeoutMs = cmdTimeout)
                 val lines = output.lines().map { it.trim() }.filter { it.isNotEmpty() }
                 val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
                 SshTestResult(
@@ -60,7 +76,7 @@ class SshClientManager {
                     latencyMs = latency
                 )
             } finally {
-                session.disconnect()
+                handle.disconnect()
             }
         }
     }
@@ -68,21 +84,20 @@ class SshClientManager {
     suspend fun collectSnapshot(
         config: ServerConfig,
         prevCpu: CpuJiffies?,
-        prevNet: NetBytes?
+        prevNet: NetBytes?,
+        prevDisk: DiskIoSectors? = null
     ): Result<ServerSnapshot> = withContext(Dispatchers.IO) {
         lockFor(config.id).withLock {
             runCatching {
                 val start = System.currentTimeMillis()
-                val session = getOrCreatePooledSession(config)
+                val cmdTimeout = (config.timeoutSeconds.coerceIn(3, 60) * 1000).coerceAtLeast(15_000)
+                val (handle, rawOutput) = execWithReconnect(config) { session ->
+                    execCommand(session, LinuxMetricParser.SSH_PROBE_COMMAND, timeoutMs = cmdTimeout)
+                }
+
                 var effectivePrevCpu = prevCpu
                 var effectivePrevNet = prevNet
-
-                val rawOutput = try {
-                    execCommand(session, LinuxMetricParser.SSH_PROBE_COMMAND, timeoutMs = 15_000)
-                } catch (e: Exception) {
-                    sessionPool.remove(config.id)?.disconnect()
-                    throw e
-                }
+                var effectivePrevDisk = prevDisk
 
                 val firstPass = LinuxMetricParser.parseSshOutput(
                     serverId = config.id,
@@ -90,15 +105,17 @@ class SshClientManager {
                     nowMs = System.currentTimeMillis(),
                     latencyMs = System.currentTimeMillis() - start,
                     prevCpu = effectivePrevCpu,
-                    prevNet = effectivePrevNet
+                    prevNet = effectivePrevNet,
+                    prevDisk = effectivePrevDisk
                 )
 
                 // On first poll without prior CPU/Net sample, grab a quick 350ms delta sample
                 if (effectivePrevCpu == null && firstPass.rawCpuJiffies != null) {
                     effectivePrevCpu = firstPass.rawCpuJiffies
                     effectivePrevNet = firstPass.rawNetBytes
+                    effectivePrevDisk = firstPass.rawDiskSectors
                     val deltaRaw = execCommand(
-                        session,
+                        handle.targetSession,
                         LinuxMetricParser.SSH_DELTA_SAMPLE_COMMAND,
                         timeoutMs = 10_000
                     )
@@ -106,16 +123,21 @@ class SshClientManager {
                     val secondNow = System.currentTimeMillis()
                     val secondCpu = LinuxMetricParser.parseProcStat(sections["STAT"].orEmpty())
                     val secondNet = LinuxMetricParser.parseProcNetDev(sections["NET"].orEmpty(), secondNow)
+                    val secondDisk = LinuxMetricParser.parseProcDiskstats(sections["DISKIO"].orEmpty(), secondNow)
                     val cpuPct = CpuJiffies.computePercent(effectivePrevCpu, secondCpu)
                     val (rxRate, txRate) = NetBytes.computeRates(effectivePrevNet, secondNet)
+                    val (diskReadRate, diskWriteRate) = DiskIoSectors.computeRates(effectivePrevDisk, secondDisk)
                     firstPass.copy(
                         timestampMs = secondNow,
                         latencyMs = (secondNow - start).coerceAtLeast(1L),
                         cpuPercent = cpuPct,
                         netRxBytesPerSec = rxRate,
                         netTxBytesPerSec = txRate,
+                        diskReadBytesPerSec = diskReadRate,
+                        diskWriteBytesPerSec = diskWriteRate,
                         rawCpuJiffies = secondCpu ?: firstPass.rawCpuJiffies,
-                        rawNetBytes = secondNet
+                        rawNetBytes = secondNet,
+                        rawDiskSectors = secondDisk ?: firstPass.rawDiskSectors
                     )
                 } else {
                     firstPass
@@ -142,8 +164,10 @@ class SshClientManager {
                     LogTargetType.SYSTEM_JOURNAL ->
                         "journalctl -n $safeLines --no-pager 2>&1 || tail -n $safeLines /var/log/syslog 2>&1"
                 }
-                val session = getOrCreatePooledSession(config)
-                val out = execCommand(session, command, timeoutMs = 15_000)
+                val cmdTimeout = (config.timeoutSeconds.coerceIn(3, 60) * 1000).coerceAtLeast(15_000)
+                val (_, out) = execWithReconnect(config) { session ->
+                    execCommand(session, command, timeoutMs = cmdTimeout)
+                }
                 out.lines()
             }
         }
@@ -170,8 +194,10 @@ class SshClientManager {
                     LogTargetType.SYSTEMD_SERVICE -> "sudo -n systemctl $verb $quotedTarget || systemctl $verb $quotedTarget"
                     LogTargetType.SYSTEM_JOURNAL -> error("系统日志不支持启停或重启操作")
                 }
-                val session = getOrCreatePooledSession(config)
-                val out = execCommand(session, command, timeoutMs = 20_000)
+                val cmdTimeout = (config.timeoutSeconds.coerceIn(3, 60) * 1000).coerceAtLeast(20_000)
+                val (_, out) = execWithReconnect(config) { session ->
+                    execCommand(session, command, timeoutMs = cmdTimeout)
+                }
                 out.ifBlank { "已完成${action.label}指令：$targetName" }
             }
         }
@@ -181,10 +207,15 @@ class SshClientManager {
         config: ServerConfig,
         command: String
     ): Result<String> = withContext(Dispatchers.IO) {
+        val validated = DiagnosticCommandValidator.validate(command)
+        val safeCommand = validated.getOrElse { return@withContext Result.failure(it) }
         lockFor(config.id).withLock {
             runCatching {
-                val session = getOrCreatePooledSession(config)
-                execCommand(session, command, timeoutMs = 20_000)
+                val cmdTimeout = (config.timeoutSeconds.coerceIn(3, 60) * 1000).coerceAtLeast(20_000)
+                val (_, out) = execWithReconnect(config) { session ->
+                    execCommand(session, safeCommand, timeoutMs = cmdTimeout)
+                }
+                out
             }
         }
     }
@@ -194,25 +225,76 @@ class SshClientManager {
     }
 
     fun disconnectAll() {
-        sessionPool.values.forEach { runCatching { it.disconnect() } }
+        sessionPool.values.forEach { it.disconnect() }
         sessionPool.clear()
     }
 
-    private fun getOrCreatePooledSession(config: ServerConfig): Session {
+    private inline fun <T> execWithReconnect(
+        config: ServerConfig,
+        block: (Session) -> T
+    ): Pair<SshSessionHandle, T> {
         val existing = sessionPool[config.id]
         if (existing != null && existing.isConnected) {
-            return existing
+            try {
+                return existing to block(existing.targetSession)
+            } catch (_: Exception) {
+                sessionPool.remove(config.id)?.disconnect()
+            }
+        } else {
+            sessionPool.remove(config.id)?.disconnect()
         }
-        sessionPool.remove(config.id)?.disconnect()
-        val (session, _, _) = openSession(config, trustUnknownHostKey = false)
-        sessionPool[config.id] = session
-        return session
+        val (fresh, _, _) = openSessionHandle(config, trustUnknownHostKey = false)
+        sessionPool[config.id] = fresh
+        return try {
+            fresh to block(fresh.targetSession)
+        } catch (e: Exception) {
+            sessionPool.remove(config.id)?.disconnect()
+            throw e
+        }
     }
 
-    private fun openSession(
+    private fun openSessionHandle(
         config: ServerConfig,
         trustUnknownHostKey: Boolean
-    ): Triple<Session, String, String> {
+    ): Triple<SshSessionHandle, String, String> {
+        val timeoutMs = config.timeoutSeconds.coerceIn(3, 60) * 1000
+
+        var jumpSession: Session? = null
+        var connectHost = config.host
+        var connectPort = config.sshPort
+
+        if (config.jumpHostEnabled && config.jumpHost.isNotBlank()) {
+            val jumpJsch = JSch()
+            if (config.jumpAuthType == SshAuthType.PRIVATE_KEY && config.jumpPrivateKey.isNotBlank()) {
+                val passBytes = config.jumpKeyPassphrase.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8)
+                jumpJsch.addIdentity(
+                    "jump_${config.id}",
+                    config.jumpPrivateKey.toByteArray(Charsets.UTF_8),
+                    null,
+                    passBytes
+                )
+            }
+            val jSession = jumpJsch.getSession(config.jumpUsername.ifBlank { "root" }, config.jumpHost, config.jumpPort.coerceIn(1, 65535))
+            if (config.jumpAuthType == SshAuthType.PASSWORD) {
+                jSession.setPassword(config.jumpPassword)
+            }
+            jSession.setConfig("StrictHostKeyChecking", "no")
+            jSession.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
+            jSession.serverAliveInterval = 15_000
+            jSession.serverAliveCountMax = 2
+            jSession.timeout = timeoutMs
+            try {
+                jSession.connect(timeoutMs)
+                val localPort = jSession.setPortForwardingL(0, config.host, config.sshPort)
+                jumpSession = jSession
+                connectHost = "127.0.0.1"
+                connectPort = localPort
+            } catch (e: Exception) {
+                runCatching { jSession.disconnect() }
+                throw e
+            }
+        }
+
         val jsch = JSch()
         if (config.sshAuthType == SshAuthType.PRIVATE_KEY && config.sshPrivateKey.isNotBlank()) {
             val passphraseBytes = config.sshKeyPassphrase.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8)
@@ -231,7 +313,7 @@ class SshClientManager {
         val repo = object : HostKeyRepository {
             override fun check(host: String?, key: ByteArray?): Int {
                 if (key == null) return HostKeyRepository.NOT_INCLUDED
-                val hk = HostKey(host ?: config.host, key)
+                val hk = HostKey(config.host, key)
                 observedKeyType = hk.type ?: "ssh"
                 observedFingerprint = computeSha256Fingerprint(key)
                 val expected = config.trustedHostFingerprint?.takeIf { it.isNotBlank() }
@@ -258,7 +340,10 @@ class SshClientManager {
         }
         jsch.hostKeyRepository = repo
 
-        val session = jsch.getSession(config.sshUsername, config.host, config.sshPort)
+        val session = jsch.getSession(config.sshUsername, connectHost, connectPort)
+        if (jumpSession != null) {
+            session.setConfig("HostKeyAlias", "${config.host}:${config.sshPort}")
+        }
         if (config.sshAuthType == SshAuthType.PASSWORD) {
             session.setPassword(config.sshPassword)
         }
@@ -266,16 +351,17 @@ class SshClientManager {
         session.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
         session.serverAliveInterval = 15_000
         session.serverAliveCountMax = 2
-        session.timeout = 12_000
+        session.timeout = timeoutMs
 
         try {
-            session.connect(10_000)
+            session.connect(timeoutMs)
         } catch (e: Exception) {
             runCatching { session.disconnect() }
+            runCatching { jumpSession?.disconnect() }
             hostKeyFailure?.let { throw it }
             throw e
         }
-        return Triple(session, observedFingerprint, observedKeyType)
+        return Triple(SshSessionHandle(session, jumpSession), observedFingerprint, observedKeyType)
     }
 
     private fun execCommand(session: Session, command: String, timeoutMs: Int): String {

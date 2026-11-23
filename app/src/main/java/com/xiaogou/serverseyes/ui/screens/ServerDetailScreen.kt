@@ -1,11 +1,16 @@
 package com.xiaogou.serverseyes.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,7 +27,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeviceThermostat
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PushPin
@@ -43,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.xiaogou.serverseyes.core.designsystem.components.AppCard
@@ -80,12 +89,19 @@ private enum class DetailTab(val label: String) {
     OPS("日志与诊断")
 }
 
+private enum class ContainerStateFilter(val label: String) {
+    ALL("全部"),
+    RUNNING("运行中"),
+    STOPPED("已停止")
+}
+
 private data class PendingWorkload(
     val targetType: LogTargetType,
     val targetName: String,
     val action: WorkloadAction
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ServerDetailPane(
     server: ServerUiModel?,
@@ -104,6 +120,7 @@ fun ServerDetailPane(
     modifier: Modifier = Modifier
 ) {
     val colors = AppTheme.colors
+    val context = LocalContext.current
     if (server == null) {
         Column(modifier = modifier.fillMaxSize().padding(AppSpacing.space4)) {
             EmptyState(
@@ -118,98 +135,114 @@ fun ServerDetailPane(
     var pendingAction by remember { mutableStateOf<PendingWorkload?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var customCmd by remember { mutableStateOf("") }
+    var workloadSearch by remember(server.config.id) { mutableStateOf("") }
+    var containerFilter by remember(server.config.id) { mutableStateOf(ContainerStateFilter.ALL) }
+    var diagCopyHint by remember { mutableStateOf<String?>(null) }
 
     val snap = server.snapshot
     val isEnabled = server.config.enabled
 
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize().imePadding(),
         contentPadding = PaddingValues(AppSpacing.space4),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.space3)
     ) {
         // Header card
         item {
             AppCard(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (server.config.isPinned) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PushPin,
-                                    contentDescription = "已置顶",
-                                    tint = colors.actionPrimary,
-                                    modifier = Modifier.size(18.dp)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (server.config.isPinned) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PushPin,
+                                        contentDescription = "已置顶",
+                                        tint = colors.actionPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Text(
+                                    text = server.config.name,
+                                    style = AppTheme.typography.titleLarge,
+                                    color = colors.textPrimary
                                 )
                             }
                             Text(
-                                text = server.config.name,
-                                style = AppTheme.typography.titleLarge,
-                                color = colors.textPrimary
+                                text = buildString {
+                                    append(server.config.host)
+                                    if (snap?.osName?.isNotBlank() == true) append(" · ${snap.osName}")
+                                    if (snap != null && snap.uptimeSeconds > 0) {
+                                        append(" · 运行 ${Formatters.formatUptime(snap.uptimeSeconds)}")
+                                    }
+                                },
+                                style = AppTheme.typography.bodySmall,
+                                color = colors.textSecondary
                             )
                         }
-                        Text(
-                            text = buildString {
-                                append(server.config.host)
-                                if (snap?.osName?.isNotBlank() == true) append(" · ${snap.osName}")
-                                if (snap != null && snap.uptimeSeconds > 0) {
-                                    append(" · 运行 ${Formatters.formatUptime(snap.uptimeSeconds)}")
-                                }
-                            },
-                            style = AppTheme.typography.bodySmall,
-                            color = colors.textSecondary
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            if (!isEnabled) {
-                                StatusChipRaw(
-                                    text = "已暂停采集",
-                                    icon = null,
-                                    backgroundColor = colors.surfaceSubtle,
-                                    contentColor = colors.textSecondary
+
+                        Row {
+                            IconButton(onClick = { onTogglePin(server.config.id, !server.config.isPinned) }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PushPin,
+                                    contentDescription = if (server.config.isPinned) "取消置顶" else "置顶",
+                                    tint = if (server.config.isPinned) colors.actionPrimary else colors.textSecondary
                                 )
-                            } else {
-                                StatusBadge(status = server.status)
                             }
-                            val sourceText = when (snap?.sourceUsed) {
-                                MetricSource.AGENT -> "Agent · ${snap.latencyMs}ms"
-                                MetricSource.SSH -> "SSH · ${snap.latencyMs}ms"
-                                null -> server.config.collectionMode.name
+                            IconButton(onClick = { onEditServer(server.config.id) }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "编辑服务器",
+                                    tint = colors.textSecondary
+                                )
                             }
+                            IconButton(onClick = { showDeleteConfirm = true }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = "删除服务器",
+                                    tint = colors.error
+                                )
+                            }
+                        }
+                    }
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (!isEnabled) {
                             StatusChipRaw(
-                                text = sourceText,
+                                text = "已暂停采集",
                                 icon = null,
                                 backgroundColor = colors.surfaceSubtle,
                                 contentColor = colors.textSecondary
                             )
+                        } else {
+                            StatusBadge(status = server.status)
                         }
-                    }
-
-                    Row {
-                        IconButton(onClick = { onTogglePin(server.config.id, !server.config.isPinned) }) {
-                            Icon(
-                                imageVector = Icons.Rounded.PushPin,
-                                contentDescription = if (server.config.isPinned) "取消置顶" else "置顶",
-                                tint = if (server.config.isPinned) colors.actionPrimary else colors.textSecondary
-                            )
+                        val sourceText = when (snap?.sourceUsed) {
+                            MetricSource.AGENT -> "Agent · ${snap.latencyMs}ms"
+                            MetricSource.SSH -> "SSH · ${snap.latencyMs}ms"
+                            null -> server.config.collectionMode.name
                         }
-                        IconButton(onClick = { onEditServer(server.config.id) }) {
-                            Icon(
-                                imageVector = Icons.Rounded.Edit,
-                                contentDescription = "编辑服务器",
-                                tint = colors.textSecondary
-                            )
-                        }
-                        IconButton(onClick = { showDeleteConfirm = true }) {
-                            Icon(
-                                imageVector = Icons.Rounded.DeleteOutline,
-                                contentDescription = "删除服务器",
-                                tint = colors.error
+                        StatusChipRaw(
+                            text = sourceText,
+                            icon = null,
+                            backgroundColor = colors.surfaceSubtle,
+                            contentColor = colors.textSecondary
+                        )
+                        snap?.cpuTempCelsius?.let { temp ->
+                            val hot = temp >= 80.0
+                            StatusChipRaw(
+                                text = String.format(Locale.US, "%.1f°C", temp),
+                                icon = Icons.Rounded.DeviceThermostat,
+                                backgroundColor = if (hot) colors.warningSoft else colors.successSoft,
+                                contentColor = if (hot) colors.warning else colors.success
                             )
                         }
                     }
@@ -432,6 +465,43 @@ fun ServerDetailPane(
                         }
                     }
 
+                    // Realtime I/O throughput (Network + Disk)
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                        ) {
+                            AppCard(modifier = Modifier.weight(1f)) {
+                                Text("实时网络吞吐", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "RX ${Formatters.formatBytesPerSec(snap.netRxBytesPerSec)}",
+                                    style = AppTheme.typography.labelLarge.tabular(),
+                                    color = colors.actionPrimary
+                                )
+                                Text(
+                                    text = "TX ${Formatters.formatBytesPerSec(snap.netTxBytesPerSec)}",
+                                    style = AppTheme.typography.bodySmall.tabular(),
+                                    color = colors.warning
+                                )
+                            }
+                            AppCard(modifier = Modifier.weight(1f)) {
+                                Text("实时磁盘 I/O", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "读 ${Formatters.formatBytesPerSec(snap.diskReadBytesPerSec)}",
+                                    style = AppTheme.typography.labelLarge.tabular(),
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "写 ${Formatters.formatBytesPerSec(snap.diskWriteBytesPerSec)}",
+                                    style = AppTheme.typography.bodySmall.tabular(),
+                                    color = colors.textSecondary
+                                )
+                            }
+                        }
+                    }
+
                     if (snap.disks.isNotEmpty()) {
                         item {
                             AppCard(modifier = Modifier.fillMaxWidth()) {
@@ -448,8 +518,9 @@ fun ServerDetailPane(
                                             style = AppTheme.typography.labelLarge,
                                             color = colors.textPrimary
                                         )
+                                        val inodeSuffix = disk.inodeUsedPercent?.let { " · Inode ${it.roundToInt()}%" }.orEmpty()
                                         Text(
-                                            text = "${disk.usagePercent.roundToInt()}% · ${Formatters.formatBytes(disk.usedBytes)} / ${Formatters.formatBytes(disk.totalBytes)}",
+                                            text = "${disk.usagePercent.roundToInt()}%$inodeSuffix · ${Formatters.formatBytes(disk.usedBytes)} / ${Formatters.formatBytes(disk.totalBytes)}",
                                             style = AppTheme.typography.bodySmall.tabular(),
                                             color = colors.textSecondary
                                         )
@@ -473,12 +544,25 @@ fun ServerDetailPane(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = "${proc.name} (PID ${proc.pid})",
-                                            style = AppTheme.typography.bodyMedium,
-                                            color = colors.textPrimary,
-                                            modifier = Modifier.weight(1f)
-                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "${proc.name} (PID ${proc.pid})",
+                                                style = AppTheme.typography.bodyMedium,
+                                                color = colors.textPrimary
+                                            )
+                                            val metaParts = buildList {
+                                                if (proc.user.isNotBlank()) add(proc.user)
+                                                if (proc.state.isNotBlank()) add("状态 ${proc.state}")
+                                                if (proc.rssBytes > 0L) add("RSS ${Formatters.formatBytes(proc.rssBytes)}")
+                                            }
+                                            if (metaParts.isNotEmpty()) {
+                                                Text(
+                                                    text = metaParts.joinToString(" · "),
+                                                    style = AppTheme.typography.bodySmall.tabular(),
+                                                    color = colors.textSecondary
+                                                )
+                                            }
+                                        }
                                         Text(
                                             text = String.format(Locale.US, "CPU %.1f%% · MEM %.1f%%", proc.cpuPercent, proc.memPercent),
                                             style = AppTheme.typography.bodySmall.tabular(),
@@ -500,16 +584,65 @@ fun ServerDetailPane(
                 } else {
                     item {
                         AppCard(modifier = Modifier.fillMaxWidth()) {
-                            SectionHeader(title = "Docker 容器 (${snap.containers.size})")
+                            Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
+                                AppTextField(
+                                    label = "搜索容器 / 服务",
+                                    value = workloadSearch,
+                                    onValueChange = { workloadSearch = it },
+                                    placeholder = "按容器名、镜像或 systemd 单元过滤..."
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    ContainerStateFilter.entries.forEach { cf ->
+                                        val active = containerFilter == cf
+                                        Surface(
+                                            onClick = { containerFilter = cf },
+                                            shape = RoundedCornerShape(AppRadius.full),
+                                            color = if (active) colors.infoSoft else colors.surfaceSubtle,
+                                            border = if (active) BorderStroke(1.dp, colors.actionPrimary) else null
+                                        ) {
+                                            Text(
+                                                text = cf.label,
+                                                style = AppTheme.typography.labelSmall,
+                                                color = if (active) colors.actionPrimary else colors.textSecondary,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    val filteredContainers = snap.containers.filter { c ->
+                        val matchState = when (containerFilter) {
+                            ContainerStateFilter.ALL -> true
+                            ContainerStateFilter.RUNNING -> c.isRunning
+                            ContainerStateFilter.STOPPED -> !c.isRunning
+                        }
+                        val matchQuery = workloadSearch.isBlank() ||
+                            c.name.contains(workloadSearch, ignoreCase = true) ||
+                            c.image.contains(workloadSearch, ignoreCase = true)
+                        matchState && matchQuery
+                    }
+
+                    val filteredServices = snap.services.filter { sv ->
+                        workloadSearch.isBlank() ||
+                            sv.unit.contains(workloadSearch, ignoreCase = true) ||
+                            sv.description.contains(workloadSearch, ignoreCase = true)
+                    }
+
+                    item {
+                        AppCard(modifier = Modifier.fillMaxWidth()) {
+                            SectionHeader(title = "Docker 容器 (${filteredContainers.size}/${snap.containers.size})")
                             Spacer(Modifier.height(AppSpacing.space2))
-                            if (snap.containers.isEmpty()) {
+                            if (filteredContainers.isEmpty()) {
                                 Text(
-                                    text = "未检测到 Docker 容器或宿主机未安装 Docker。",
+                                    text = if (snap.containers.isEmpty()) "未检测到 Docker 容器或宿主机未安装 Docker。" else "当前筛选条件下无匹配容器。",
                                     style = AppTheme.typography.bodySmall,
                                     color = colors.textSecondary
                                 )
                             } else {
-                                snap.containers.forEachIndexed { idx, c ->
+                                filteredContainers.forEachIndexed { idx, c ->
                                     if (idx > 0) AppDivider(Modifier.padding(vertical = 8.dp))
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Row(
@@ -530,6 +663,29 @@ fun ServerDetailPane(
                                                 backgroundColor = if (c.isRunning) colors.successSoft else colors.errorSoft,
                                                 contentColor = if (c.isRunning) colors.success else colors.error
                                             )
+                                        }
+                                        if (c.cpuPercent != null || c.memUsageText.isNotBlank()) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                ) {
+                                                    Text(
+                                                        text = c.cpuPercent?.let { String.format(Locale.US, "CPU %.1f%%", it) } ?: "CPU --",
+                                                        style = AppTheme.typography.bodySmall.tabular(),
+                                                        color = colors.actionPrimary
+                                                    )
+                                                    val memPctSuffix = c.memPercent?.let { String.format(Locale.US, " (%.1f%%)", it) }.orEmpty()
+                                                    Text(
+                                                        text = if (c.memUsageText.isNotBlank()) "MEM ${c.memUsageText}$memPctSuffix" else "MEM --",
+                                                        style = AppTheme.typography.bodySmall.tabular(),
+                                                        color = colors.textSecondary
+                                                    )
+                                                }
+                                                c.memPercent?.let { pct ->
+                                                    MetricProgressBar(percent = pct, height = 4.dp)
+                                                }
+                                            }
                                         }
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -574,16 +730,16 @@ fun ServerDetailPane(
 
                     item {
                         AppCard(modifier = Modifier.fillMaxWidth()) {
-                            SectionHeader(title = "Systemd 服务 (${snap.services.size})")
+                            SectionHeader(title = "Systemd 服务 (${filteredServices.size}/${snap.services.size})")
                             Spacer(Modifier.height(AppSpacing.space2))
-                            if (snap.services.isEmpty()) {
+                            if (filteredServices.isEmpty()) {
                                 Text(
-                                    text = "未获取到 Systemd 服务列表。",
+                                    text = if (snap.services.isEmpty()) "未获取到 Systemd 服务列表。" else "无匹配的 Systemd 服务。",
                                     style = AppTheme.typography.bodySmall,
                                     color = colors.textSecondary
                                 )
                             } else {
-                                snap.services.take(25).forEachIndexed { idx, sv ->
+                                filteredServices.take(25).forEachIndexed { idx, sv ->
                                     if (idx > 0) AppDivider(Modifier.padding(vertical = 8.dp))
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Row(
@@ -680,20 +836,61 @@ fun ServerDetailPane(
                             onValueChange = { customCmd = it },
                             placeholder = "例如：uptime && df -h"
                         )
+                        if (opsState.diagHistory.isNotEmpty()) {
+                            Spacer(Modifier.height(AppSpacing.space2))
+                            Text("最近执行记录（点击回填）", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
+                            Spacer(Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                opsState.diagHistory.forEach { cmd ->
+                                    Surface(
+                                        onClick = { customCmd = cmd },
+                                        shape = RoundedCornerShape(AppRadius.full),
+                                        color = colors.surfaceSubtle
+                                    ) {
+                                        Text(
+                                            text = cmd.take(28) + if (cmd.length > 28) "..." else "",
+                                            style = AppTheme.typography.labelSmall,
+                                            color = colors.actionPrimary,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(AppSpacing.space2))
-                        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.space2)
+                        ) {
                             PrimaryButton(
                                 text = "执行命令",
                                 loading = opsState.isRunningDiag,
                                 enabled = customCmd.isNotBlank() && server.config.collectionMode != CollectionMode.AGENT_ONLY,
                                 icon = Icons.Rounded.Terminal,
-                                modifier = Modifier.weight(1f),
                                 onClick = { onRunDiagnostic(server.config.id, customCmd.trim()) }
                             )
                             SecondaryButton(
                                 text = "系统日志",
                                 onClick = { onOpenLogs(server.config.id, LogTargetType.SYSTEM_JOURNAL, "system", 150) }
                             )
+                            SecondaryButton(
+                                text = "复制输出",
+                                icon = Icons.Rounded.ContentCopy,
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("server-diag-output", opsState.diagOutput))
+                                    diagCopyHint = "已复制诊断输出到剪贴板"
+                                }
+                            )
+                        }
+                        if (diagCopyHint != null) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(diagCopyHint!!, style = AppTheme.typography.bodySmall, color = colors.success)
                         }
                         Spacer(Modifier.height(AppSpacing.space3))
                         Box(

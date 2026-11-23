@@ -1,6 +1,7 @@
 package com.xiaogou.serverseyes
 
 import android.app.Application
+import androidx.room.withTransaction
 import com.xiaogou.serverseyes.core.network.AgentApiClient
 import com.xiaogou.serverseyes.core.security.CryptoManager
 import com.xiaogou.serverseyes.core.ssh.SshClientManager
@@ -32,7 +33,8 @@ class AppContainer(application: Application) {
         cryptoManager = cryptoManager,
         sshClient = sshClient,
         agentClient = agentClient,
-        alertNotifier = alertNotifier
+        alertNotifier = alertNotifier,
+        runInTransaction = { block -> database.withTransaction { block() } }
     )
 }
 
@@ -48,7 +50,11 @@ class ServersEyesApplication : Application() {
         appScope.launch {
             container.repository.ensureDefaultAlertRules()
             val settings = container.settingsStore.settingsFlow.first()
-            MonitoringWorker.schedule(this@ServersEyesApplication, settings.backgroundWorkEnabled)
+            MonitoringWorker.schedule(
+                this@ServersEyesApplication,
+                settings.backgroundWorkEnabled,
+                settings.backgroundIntervalMinutes
+            )
             if (settings.foregroundServiceEnabled) {
                 runCatching { ForegroundMonitorService.setRunning(this@ServersEyesApplication, true) }
             }

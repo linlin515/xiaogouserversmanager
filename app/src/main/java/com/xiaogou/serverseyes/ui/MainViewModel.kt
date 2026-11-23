@@ -4,16 +4,20 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.xiaogou.serverseyes.ServersEyesApplication
+import com.xiaogou.serverseyes.core.backup.BackupImportStrategy
+import com.xiaogou.serverseyes.core.backup.BackupPreview
 import com.xiaogou.serverseyes.core.model.AlertEvent
 import com.xiaogou.serverseyes.core.model.AlertRule
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.MetricPoint
 import com.xiaogou.serverseyes.core.model.ServerConfig
+import com.xiaogou.serverseyes.core.model.ServerSortOption
 import com.xiaogou.serverseyes.core.model.ServerStatus
 import com.xiaogou.serverseyes.core.model.ThemePreference
 import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.parser.ErrorMapper
 import com.xiaogou.serverseyes.data.local.AppSettings
+import com.xiaogou.serverseyes.data.repository.BackupImportSummary
 import com.xiaogou.serverseyes.data.repository.ConnectionTestSummary
 import com.xiaogou.serverseyes.data.repository.ServerUiModel
 import com.xiaogou.serverseyes.service.ForegroundMonitorService
@@ -44,6 +48,7 @@ data class DetailOpsState(
     val isLogsOpen: Boolean = false,
     val isLoadingLogs: Boolean = false,
     val diagOutput: String = "点击上方预设诊断项或输入只读命令开始排查",
+    val diagHistory: List<String> = emptyList(),
     val isRunningDiag: Boolean = false,
     val isActionPending: Boolean = false
 )
@@ -127,15 +132,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshNow() {
         viewModelScope.launch {
-            performRefreshCycle()
+            performRefreshCycle(force = true)
         }
     }
 
-    private suspend fun performRefreshCycle() {
+    private suspend fun performRefreshCycle(force: Boolean = false) {
         if (_isRefreshing.value) return
         _isRefreshing.value = true
         try {
-            repo.refreshAllServers()
+            repo.refreshAllServers(force = force)
             _lastRefreshMs.value = System.currentTimeMillis()
             _selectedServerId.value?.let { id ->
                 loadHistoryInternal(id, _detailOps.value.historyMinutes)
@@ -267,9 +272,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             repo.runDiagnosticCommand(cfg, command).fold(
                 onSuccess = { out ->
+                    val updatedHistory = (listOf(command) + _detailOps.value.diagHistory.filterNot { it == command }).take(12)
                     _detailOps.value = _detailOps.value.copy(
                         isRunningDiag = false,
-                        diagOutput = "$ $command\n${out.ifBlank { "(无输出)" }}"
+                        diagOutput = "$ $command\n${out.ifBlank { "(无输出)" }}",
+                        diagHistory = updatedHistory
                     )
                 },
                 onFailure = { e ->
@@ -339,6 +346,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun batchSetPinned(serverIds: Set<String>, pinned: Boolean) {
+        if (serverIds.isEmpty()) return
+        viewModelScope.launch {
+            repo.batchSetPinned(serverIds, pinned)
+            _snackbarEvents.emit(if (pinned) "已批量置顶 ${serverIds.size} 台服务器" else "已取消置顶 ${serverIds.size} 台服务器")
+        }
+    }
+
+    fun batchSetEnabled(serverIds: Set<String>, enabled: Boolean) {
+        if (serverIds.isEmpty()) return
+        viewModelScope.launch {
+            repo.batchSetEnabled(serverIds, enabled)
+            _snackbarEvents.emit(if (enabled) "已恢复 ${serverIds.size} 台节点采集" else "已暂停 ${serverIds.size} 台节点采集")
+        }
+    }
+
+    fun batchDeleteServers(serverIds: Set<String>) {
+        if (serverIds.isEmpty()) return
+        viewModelScope.launch {
+            repo.batchDeleteServers(serverIds)
+            if (_selectedServerId.value in serverIds) {
+                _selectedServerId.value = servers.value.firstOrNull { it.config.id !in serverIds }?.config?.id
+            }
+            _snackbarEvents.emit("已删除选中的 ${serverIds.size} 台服务器")
+        }
+    }
+
+    fun setSortOption(option: ServerSortOption) {
+        viewModelScope.launch { settingsStore.setSortOption(option) }
+    }
+
     fun trustFingerprint(serverId: String, fingerprint: String) {
         viewModelScope.launch {
             repo.trustFingerprint(serverId, fingerprint)
@@ -347,13 +385,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun exportBackupJson(includeSecrets: Boolean, passphrase: String?): String =
-        repo.exportBackupJson(includeSecrets, passphrase)
+    suspend fun exportBackupJson(
+        includeSecrets: Boolean,
+        passphrase: String?,
+        includeHistory: Boolean = false
+    ): String = repo.exportBackupJson(includeSecrets, passphrase, includeHistory)
+
+    fun previewBackupJson(rawJson: String, passphrase: String?): Result<BackupPreview> =
+        repo.previewBackupJson(rawJson, passphrase)
 
     suspend fun importBackupJson(rawJson: String, passphrase: String?): Result<Pair<Int, Int>> {
         val result = repo.importBackupJson(rawJson, passphrase)
         if (result.isSuccess) {
-            performRefreshCycle()
+            performRefreshCycle(force = true)
+        }
+        return result
+    }
+
+    suspend fun importBackup(
+        rawJson: String,
+        passphrase: String?,
+        strategy: BackupImportStrategy,
+        includeHistory: Boolean
+    ): Result<BackupImportSummary> {
+        val result = repo.importBackup(rawJson, passphrase, strategy, includeHistory)
+        if (result.isSuccess) {
+            performRefreshCycle(force = true)
         }
         return result
     }
@@ -387,7 +444,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setBackgroundWorkEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settingsStore.setBackgroundWorkEnabled(enabled)
-            MonitoringWorker.schedule(app, enabled)
+            val interval = settingsStore.settingsFlow.first().backgroundIntervalMinutes
+            MonitoringWorker.schedule(app, enabled, interval, forceUpdate = true)
+        }
+    }
+
+    fun setBackgroundIntervalMinutes(minutes: Int) {
+        viewModelScope.launch {
+            settingsStore.setBackgroundIntervalMinutes(minutes)
+            val enabled = settingsStore.settingsFlow.first().backgroundWorkEnabled
+            if (enabled) {
+                MonitoringWorker.schedule(app, true, minutes, forceUpdate = true)
+            }
         }
     }
 
@@ -400,6 +468,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setNotificationsEnabled(enabled: Boolean) {
         viewModelScope.launch { settingsStore.setNotificationsEnabled(enabled) }
+    }
+
+    fun setNotifyOnRecovery(enabled: Boolean) {
+        viewModelScope.launch { settingsStore.setNotifyOnRecovery(enabled) }
+    }
+
+    fun setDndConfig(
+        enabled: Boolean,
+        startMinute: Int,
+        endMinute: Int,
+        allowCritical: Boolean
+    ) {
+        viewModelScope.launch {
+            settingsStore.setDndConfig(enabled, startMinute, endMinute, allowCritical)
+        }
     }
 
     fun clearLocalCache() {

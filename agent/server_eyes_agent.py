@@ -7,6 +7,7 @@ Exposes Bearer-token authenticated HTTP API + SQLite historical ring-buffer.
 from __future__ import annotations
 
 import argparse
+import glob
 import hmac
 import json
 import os
@@ -15,15 +16,17 @@ import re
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
 IGNORED_FS = {"tmpfs", "devtmpfs", "udev", "overlay", "squashfs", "efivarfs"}
+WHOLE_DISK_RE = re.compile(r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$")
 
 
 def run_cmd(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str]:
@@ -123,6 +126,51 @@ def read_net_bytes() -> Tuple[int, int]:
     return rx_total, tx_total
 
 
+def read_disk_sectors() -> Optional[Tuple[int, int]]:
+    read_sec = 0
+    write_sec = 0
+    matched = False
+    try:
+        with open("/proc/diskstats", "r", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                if not WHOLE_DISK_RE.match(parts[2]):
+                    continue
+                read_sec += int(parts[5])
+                write_sec += int(parts[9])
+                matched = True
+    except (OSError, ValueError):
+        return None
+    return (read_sec, write_sec) if matched else None
+
+
+def read_cpu_temp() -> Optional[float]:
+    zones: List[Tuple[str, float]] = []
+    for zone_dir in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+        temp_path = os.path.join(zone_dir, "temp")
+        type_path = os.path.join(zone_dir, "type")
+        try:
+            with open(temp_path, "r", encoding="utf-8") as fh:
+                raw_val = float(fh.read().strip())
+            zone_type = ""
+            if os.path.exists(type_path):
+                with open(type_path, "r", encoding="utf-8") as fh:
+                    zone_type = fh.read().strip().lower()
+            celsius = raw_val / 1000.0 if raw_val > 1000.0 else raw_val
+            if 1.0 <= celsius <= 125.0:
+                zones.append((zone_type, round(celsius, 1)))
+        except (OSError, ValueError):
+            continue
+    if not zones:
+        return None
+    for z_type, temp in zones:
+        if any(k in z_type for k in ("x86_pkg", "cpu", "core", "k10temp")):
+            return temp
+    return max(t for _, t in zones)
+
+
 def read_uptime_and_load() -> Tuple[int, float, float, float]:
     uptime_s = 0
     load1 = load5 = load15 = 0.0
@@ -151,10 +199,29 @@ def read_os_pretty_name() -> str:
     return f"{platform.system()} {platform.release()}"
 
 
+def read_inodes() -> Dict[str, float]:
+    rc, out = run_cmd(["df", "-iP"], timeout=4.0)
+    if rc != 0:
+        return {}
+    mapping: Dict[str, float] = {}
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        mount = " ".join(parts[5:])
+        pct_str = parts[4].rstrip("%")
+        try:
+            mapping[mount] = min(100.0, max(0.0, float(pct_str)))
+        except ValueError:
+            continue
+    return mapping
+
+
 def read_disks() -> List[Dict[str, Any]]:
     rc, out = run_cmd(["df", "-kP"], timeout=4.0)
     if rc != 0:
         return []
+    inodes = read_inodes()
     seen = set()
     result = []
     for line in out.splitlines()[1:]:
@@ -175,40 +242,73 @@ def read_disks() -> List[Dict[str, Any]]:
             pct = float(parts[4].rstrip("%"))
         except ValueError:
             continue
-        result.append(
-            {
-                "filesystem": fs,
-                "mountPoint": mount,
-                "totalBytes": total_kb * 1024,
-                "usedBytes": used_kb * 1024,
-                "availBytes": avail_kb * 1024,
-                "usagePercent": min(100.0, max(0.0, pct)),
-            }
-        )
+        entry: Dict[str, Any] = {
+            "filesystem": fs,
+            "mountPoint": mount,
+            "totalBytes": total_kb * 1024,
+            "usedBytes": used_kb * 1024,
+            "availBytes": avail_kb * 1024,
+            "usagePercent": min(100.0, max(0.0, pct)),
+        }
+        if mount in inodes:
+            entry["inodeUsedPercent"] = inodes[mount]
+        result.append(entry)
     return result
 
 
 def read_top_processes() -> List[Dict[str, Any]]:
-    rc, out = run_cmd(["ps", "-eo", "pid,comm,%cpu,%mem", "--sort=-%cpu"], timeout=4.0)
+    rc, out = run_cmd(["ps", "-eo", "pid,user,%cpu,%mem,rss,stat,comm", "--sort=-%cpu"], timeout=4.0)
     if rc != 0:
         return []
     procs = []
     for line in out.splitlines()[1:11]:
-        parts = line.split(None, 3)
-        if len(parts) < 4:
+        parts = line.split(None, 6)
+        if len(parts) < 7:
             continue
         try:
             procs.append(
                 {
                     "pid": int(parts[0]),
-                    "name": parts[1],
+                    "user": parts[1],
                     "cpuPercent": float(parts[2]),
                     "memPercent": float(parts[3]),
+                    "rssBytes": int(parts[4]) * 1024,
+                    "state": parts[5],
+                    "name": parts[6],
                 }
             )
         except ValueError:
             continue
     return procs
+
+
+def read_docker_stats() -> Dict[str, Dict[str, Any]]:
+    rc, out = run_cmd(
+        ["docker", "stats", "--no-stream", "--no-trunc", "--format", "{{.ID}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}"],
+        timeout=5.0,
+    )
+    if rc != 0:
+        return {}
+    stats: Dict[str, Dict[str, Any]] = {}
+    for line in out.splitlines():
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+        cid = parts[0][:12]
+        try:
+            cpu_pct = max(0.0, float(parts[1].rstrip("%").strip()))
+        except ValueError:
+            continue
+        try:
+            mem_pct = min(100.0, max(0.0, float(parts[3].rstrip("%").strip())))
+        except ValueError:
+            mem_pct = 0.0
+        stats[cid] = {
+            "cpuPercent": round(cpu_pct, 2),
+            "memUsageText": parts[2].strip(),
+            "memPercent": round(mem_pct, 2),
+        }
+    return stats
 
 
 def read_docker_containers() -> List[Dict[str, Any]]:
@@ -218,21 +318,24 @@ def read_docker_containers() -> List[Dict[str, Any]]:
     )
     if rc != 0:
         return []
+    stats_map = read_docker_stats()
     items = []
     for line in out.splitlines():
         parts = line.split("|")
         if len(parts) < 5:
             continue
-        items.append(
-            {
-                "id": parts[0][:12],
-                "name": parts[1],
-                "image": parts[2],
-                "state": parts[3],
-                "statusText": parts[4],
-                "ports": parts[5] if len(parts) > 5 else "",
-            }
-        )
+        cid = parts[0][:12]
+        item: Dict[str, Any] = {
+            "id": cid,
+            "name": parts[1],
+            "image": parts[2],
+            "state": parts[3],
+            "statusText": parts[4],
+            "ports": parts[5] if len(parts) > 5 else "",
+        }
+        if cid in stats_map:
+            item.update(stats_map[cid])
+        items.append(item)
     return items
 
 
@@ -351,16 +454,29 @@ class MetricsStore:
 
 
 class AgentCollector:
-    def __init__(self, store: MetricsStore) -> None:
+    def __init__(
+        self,
+        store: MetricsStore,
+        snapshot_cache_ttl_sec: float = 2.0,
+        heavy_ttl_sec: float = 15.0,
+    ) -> None:
         self.store = store
+        self.snapshot_cache_ttl_sec = snapshot_cache_ttl_sec
+        self.heavy_ttl_sec = heavy_ttl_sec
         self._lock = threading.Lock()
         self._prev_cpu: Optional[Tuple[int, int]] = read_proc_stat()
-        self._prev_net: Optional[Tuple[int, int, float]] = None
         rx, tx = read_net_bytes()
-        self._prev_net = (rx, tx, time.time())
+        now_s = time.time()
+        self._prev_net: Optional[Tuple[int, int, float]] = (rx, tx, now_s)
+        disk_sec = read_disk_sectors()
+        self._prev_disk: Optional[Tuple[int, int, float]] = (
+            (disk_sec[0], disk_sec[1], now_s) if disk_sec is not None else None
+        )
         self._latest_snapshot: Optional[Dict[str, Any]] = None
+        self._latest_collect_ts: float = 0.0
+        self._last_heavy_ts: float = 0.0
 
-    def collect_once(self, include_heavy: bool = True) -> Dict[str, Any]:
+    def collect_once(self, include_heavy: Optional[bool] = None) -> Dict[str, Any]:
         with self._lock:
             now_s = time.time()
             now_ms = int(now_s * 1000)
@@ -376,8 +492,18 @@ class AgentCollector:
                 tx_bps = int(max(0, tx - self._prev_net[1]) / dt)
             self._prev_net = (rx, tx, now_s)
 
+            curr_disk = read_disk_sectors()
+            disk_read_bps = disk_write_bps = 0
+            if curr_disk is not None:
+                if self._prev_disk is not None:
+                    dt_d = max(0.001, now_s - self._prev_disk[2])
+                    disk_read_bps = int(max(0, curr_disk[0] - self._prev_disk[0]) * 512 / dt_d)
+                    disk_write_bps = int(max(0, curr_disk[1] - self._prev_disk[1]) * 512 / dt_d)
+                self._prev_disk = (curr_disk[0], curr_disk[1], now_s)
+
             uptime_s, load1, load5, load15 = read_uptime_and_load()
             mem = read_meminfo()
+            cpu_temp = read_cpu_temp()
 
             snapshot: Dict[str, Any] = {
                 "timestampMs": now_ms,
@@ -393,28 +519,91 @@ class AgentCollector:
                 **mem,
                 "netRxBytesPerSec": rx_bps,
                 "netTxBytesPerSec": tx_bps,
+                "diskReadBytesPerSec": disk_read_bps,
+                "diskWriteBytesPerSec": disk_write_bps,
+                "cpuTempCelsius": cpu_temp,
             }
-            if include_heavy or self._latest_snapshot is None:
+
+            should_collect_heavy = (
+                self._latest_snapshot is None
+                or include_heavy is True
+                or (include_heavy is None and (now_s - self._last_heavy_ts) >= self.heavy_ttl_sec)
+            )
+            if should_collect_heavy:
                 snapshot["disks"] = read_disks()
                 snapshot["topProcesses"] = read_top_processes()
                 snapshot["containers"] = read_docker_containers()
                 snapshot["services"] = read_systemd_services()
                 snapshot["ports"] = read_listening_ports()
+                self._last_heavy_ts = now_s
             else:
                 for k in ("disks", "topProcesses", "containers", "services", "ports"):
                     snapshot[k] = self._latest_snapshot.get(k, [])
 
             self._latest_snapshot = snapshot
+            self._latest_collect_ts = now_s
             self.store.record(snapshot)
             return snapshot
 
     def get_snapshot(self) -> Dict[str, Any]:
-        if self._latest_snapshot is None:
-            return self.collect_once(include_heavy=True)
-        return self.collect_once(include_heavy=True)
+        with self._lock:
+            if (
+                self._latest_snapshot is not None
+                and (time.time() - self._latest_collect_ts) < self.snapshot_cache_ttl_sec
+            ):
+                return self._latest_snapshot
+        return self.collect_once(include_heavy=None)
 
 
-def make_handler(collector: AgentCollector, store: MetricsStore, token: str, enable_actions: bool):
+class AuthRateLimiter:
+    def __init__(self, max_failures: int = 10, window_sec: float = 60.0, block_sec: float = 60.0) -> None:
+        self.max_failures = max_failures
+        self.window_sec = window_sec
+        self.block_sec = block_sec
+        self._lock = threading.Lock()
+        self._failures: Dict[str, List[float]] = {}
+        self._blocked_until: Dict[str, float] = {}
+
+    def is_blocked(self, client_ip: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            until = self._blocked_until.get(client_ip, 0.0)
+            if until > now:
+                return True
+            if until > 0.0:
+                self._blocked_until.pop(client_ip, None)
+            return False
+
+    def record_failure(self, client_ip: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if len(self._failures) > 1024:
+                self._failures.clear()
+                self._blocked_until.clear()
+            cutoff = now - self.window_sec
+            attempts = [t for t in self._failures.get(client_ip, []) if t >= cutoff]
+            attempts.append(now)
+            self._failures[client_ip] = attempts
+            if len(attempts) >= self.max_failures:
+                self._blocked_until[client_ip] = now + self.block_sec
+                self._failures.pop(client_ip, None)
+
+    def record_success(self, client_ip: str) -> None:
+        with self._lock:
+            self._failures.pop(client_ip, None)
+            self._blocked_until.pop(client_ip, None)
+
+
+def make_handler(
+    collector: AgentCollector,
+    store: MetricsStore,
+    token: str,
+    enable_actions: bool,
+    allow_unauthenticated: bool = False,
+    rate_limiter: Optional[AuthRateLimiter] = None,
+):
+    limiter = rate_limiter or AuthRateLimiter()
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -430,16 +619,26 @@ def make_handler(collector: AgentCollector, store: MetricsStore, token: str, ena
             self.wfile.write(body)
 
         def _authorized(self) -> bool:
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            if limiter.is_blocked(client_ip):
+                self._send_json(429, {"error": "too many failed auth attempts"})
+                return False
             if not token:
-                return True
+                if allow_unauthenticated:
+                    return True
+                self._send_json(401, {"error": "agent token not configured"})
+                return False
             auth = self.headers.get("Authorization", "")
             if not auth.startswith("Bearer "):
+                limiter.record_failure(client_ip)
                 self._send_json(401, {"error": "unauthorized"})
                 return False
             supplied = auth[7:].strip()
             if not hmac.compare_digest(supplied, token):
+                limiter.record_failure(client_ip)
                 self._send_json(403, {"error": "forbidden"})
                 return False
+            limiter.record_success(client_ip)
             return True
 
         def do_GET(self) -> None:
@@ -520,11 +719,23 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0", help="Listen host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=19090, help="Listen port (default: 19090)")
     parser.add_argument("--token", default=os.environ.get("SERVER_EYES_TOKEN", ""), help="Bearer auth token")
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help="Explicitly allow running without a Bearer token (NOT recommended outside isolated local testing)",
+    )
     parser.add_argument("--interval", type=int, default=10, help="Background sample interval seconds")
     parser.add_argument("--db-path", default="server_eyes_agent.db", help="SQLite ring-buffer path")
     parser.add_argument("--retention-hours", type=int, default=48, help="History retention hours")
     parser.add_argument("--enable-actions", action="store_true", help="Allow container/service restart via API")
     args = parser.parse_args()
+
+    if not args.token and not args.allow_unauthenticated:
+        print(
+            "Error: --token (or SERVER_EYES_TOKEN) is required. Pass --allow-unauthenticated only for local testing.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     store = MetricsStore(args.db_path, args.retention_hours)
     collector = AgentCollector(store)
@@ -532,7 +743,7 @@ def main() -> None:
     def sampler_loop() -> None:
         while True:
             try:
-                collector.collect_once(include_heavy=False)
+                collector.collect_once(include_heavy=None)
             except Exception:
                 pass
             time.sleep(max(3, args.interval))
@@ -540,9 +751,15 @@ def main() -> None:
     threading.Thread(target=sampler_loop, daemon=True).start()
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(collector, store, args.token, args.enable_actions),
+        make_handler(
+            collector,
+            store,
+            args.token,
+            args.enable_actions,
+            allow_unauthenticated=args.allow_unauthenticated,
+        ),
     )
-    print(f"XiaoGou ServerEyes Agent v{VERSION} listening on {args.host}:{args.port}")
+    print(f"XiaoGou Server Agent v{VERSION} listening on {args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

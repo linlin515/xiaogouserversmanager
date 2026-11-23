@@ -17,11 +17,15 @@ class AgentUnitTest(unittest.TestCase):
         self.assertEqual(agent.compute_cpu_percent((1000, 500), (2000, 1000)), 50.0)
         self.assertEqual(agent.compute_cpu_percent(None, (2000, 1000)), 0.0)
 
+    def test_read_docker_stats_graceful_fallback(self):
+        stats = agent.read_docker_stats()
+        self.assertIsInstance(stats, dict)
+
     def test_sqlite_store_and_http_endpoints(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             store = agent.MetricsStore(db_path, retention_hours=24)
-            collector = agent.AgentCollector(store)
+            collector = agent.AgentCollector(store, snapshot_cache_ttl_sec=5.0, heavy_ttl_sec=30.0)
             handler_cls = agent.make_handler(collector, store, token="test-secret", enable_actions=False)
             server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
             port = server.server_address[1]
@@ -44,15 +48,22 @@ class AgentUnitTest(unittest.TestCase):
                     data = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(data["status"], "ok")
 
-                # 3. Snapshot + history
+                # 3. Snapshot + cache hit + history
                 req_snap = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/v1/snapshot",
                     headers={"Authorization": "Bearer test-secret"},
                 )
                 with urllib.request.urlopen(req_snap, timeout=5) as resp:
-                    snap = json.loads(resp.read().decode("utf-8"))
-                    self.assertIn("cpuPercent", snap)
-                    self.assertIn("memTotalBytes", snap)
+                    snap1 = json.loads(resp.read().decode("utf-8"))
+                    self.assertIn("cpuPercent", snap1)
+                    self.assertIn("memTotalBytes", snap1)
+                    self.assertIn("diskReadBytesPerSec", snap1)
+                    self.assertIn("diskWriteBytesPerSec", snap1)
+
+                # Cached call within TTL returns identical timestamp
+                with urllib.request.urlopen(req_snap, timeout=5) as resp:
+                    snap2 = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(snap1["timestampMs"], snap2["timestampMs"])
 
                 req_hist = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/v1/history?minutes=60",
@@ -75,6 +86,50 @@ class AgentUnitTest(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_empty_token_rejected_by_default_and_rate_limiter_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_sec.db")
+            store = agent.MetricsStore(db_path, retention_hours=24)
+            collector = agent.AgentCollector(store)
+            limiter = agent.AuthRateLimiter(max_failures=3, window_sec=60.0, block_sec=60.0)
+            handler_cls = agent.make_handler(
+                collector, store, token="", enable_actions=False, allow_unauthenticated=False, rate_limiter=limiter
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+            port = server.server_address[1]
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/health")
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(ctx.exception.code, 401)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+            # Test rate limiter with valid token and wrong attempts
+            limiter2 = agent.AuthRateLimiter(max_failures=2, window_sec=60.0, block_sec=60.0)
+            handler_cls2 = agent.make_handler(
+                collector, store, token="real-token", enable_actions=False, rate_limiter=limiter2
+            )
+            server2 = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls2)
+            port2 = server2.server_address[1]
+            t2 = threading.Thread(target=server2.serve_forever, daemon=True)
+            t2.start()
+            try:
+                for expected in (403, 403, 429):
+                    bad_req = urllib.request.Request(
+                        f"http://127.0.0.1:{port2}/api/v1/health",
+                        headers={"Authorization": "Bearer wrong"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(bad_req, timeout=5)
+                    self.assertEqual(ctx.exception.code, expected)
+            finally:
+                server2.shutdown()
+                server2.server_close()
 
 
 if __name__ == "__main__":
