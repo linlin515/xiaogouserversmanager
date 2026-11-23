@@ -429,7 +429,16 @@ fun ServersEyesApp(vm: MainViewModel) {
                                 onEditServer = { id -> setRoute(ActiveRoute.Editor(id)) },
                                 onDeleteServer = { id ->
                                     vm.deleteServer(id) { setRoute(ActiveRoute.Top) }
-                                }
+                                },
+                                alertEvents = alertEvents,
+                                alertRules = alertRules,
+                                onSelectTrendMetric = { vm.setHistoryMetric(it) },
+                                onToggleLiveMode = { vm.setLiveMode(it) },
+                                onSelectDetailTab = { vm.setDetailTab(it) },
+                                onSelectProcessSort = { vm.setProcessSort(it) },
+                                onSelectServiceFilter = { vm.setServiceFilter(it) },
+                                onWorkloadSearchChange = { vm.setWorkloadSearch(it) },
+                                onSelectContainerFilter = { vm.setContainerFilter(it) }
                             )
                         }
 
@@ -476,6 +485,15 @@ fun ServersEyesApp(vm: MainViewModel) {
                                                 onToggleEnable = { id, en -> vm.setEnabled(id, en) },
                                                 onEditServer = { id -> setRoute(ActiveRoute.Editor(id)) },
                                                 onDeleteServer = { id -> vm.deleteServer(id) {} },
+                                                alertEvents = alertEvents,
+                                                alertRules = alertRules,
+                                                onSelectTrendMetric = { vm.setHistoryMetric(it) },
+                                                onToggleLiveMode = { vm.setLiveMode(it) },
+                                                onSelectDetailTab = { vm.setDetailTab(it) },
+                                                onSelectProcessSort = { vm.setProcessSort(it) },
+                                                onSelectServiceFilter = { vm.setServiceFilter(it) },
+                                                onWorkloadSearchChange = { vm.setWorkloadSearch(it) },
+                                                onSelectContainerFilter = { vm.setContainerFilter(it) },
                                                 modifier = Modifier.weight(1f).fillMaxHeight()
                                             )
                                         }

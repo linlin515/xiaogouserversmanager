@@ -1,12 +1,19 @@
 package com.xiaogou.serverseyes
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import com.xiaogou.serverseyes.core.designsystem.theme.ServersEyesTheme
 import com.xiaogou.serverseyes.core.model.AlertEvent
 import com.xiaogou.serverseyes.core.model.AlertMetricType
@@ -174,10 +181,22 @@ class UiComponentsTest {
             lastSeenAtMs = 1_000L
         )
         composeRule.setContent {
+            var ops by remember { mutableStateOf(DetailOpsState()) }
+            val events = listOf(
+                AlertEvent(
+                    id = "e1", serverId = "1", serverName = "prod-api-01",
+                    metricType = AlertMetricType.CPU, severity = AlertSeverity.WARNING,
+                    currentValue = 84.0, thresholdValue = 80.0,
+                    message = "prod-api-01 CPU 达到 84%", timestampMs = 1_000L
+                )
+            )
+            val rules = listOf(
+                AlertRule("g_cpu", null, AlertMetricType.CPU, 80.0, 95.0, cooldownMinutes = 10, enabled = true)
+            )
             ServersEyesTheme(themePreference = ThemePreference.DARK) {
                 ServerDetailPane(
                     server = model,
-                    opsState = DetailOpsState(),
+                    opsState = ops,
                     onRefreshServer = {},
                     onChangeHistoryRange = { _, _ -> },
                     onOpenLogs = { _, _, _, _ -> },
@@ -186,13 +205,31 @@ class UiComponentsTest {
                     onPerformWorkloadAction = { _, _, _, _ -> },
                     onRunDiagnostic = { _, _ -> },
                     onEditServer = {},
-                    onDeleteServer = {}
+                    onDeleteServer = {},
+                    alertEvents = events,
+                    alertRules = rules,
+                    onSelectTrendMetric = { ops = ops.copy(historyMetric = it) },
+                    onToggleLiveMode = { ops = ops.copy(isLiveMode = it) },
+                    onSelectDetailTab = { ops = ops.copy(detailTab = it) },
+                    onSelectProcessSort = { ops = ops.copy(processSort = it) },
+                    onSelectServiceFilter = { ops = ops.copy(serviceFilter = it) },
+                    onWorkloadSearchChange = { ops = ops.copy(workloadSearch = it) },
+                    onSelectContainerFilter = { ops = ops.copy(containerFilter = it) }
                 )
             }
         }
-        composeRule.onNodeWithText("54.5°C").assertIsDisplayed()
-        composeRule.onNodeWithText("实时磁盘 I/O").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("40% · Inode 15% · 400 B / 1000 B").performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("54.5°C").assertCountEquals(2)
+        composeRule.onNodeWithText("性能趋势").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("CPU · 内存").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("暂无 1h 历史采样").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("detail_list").performScrollToNode(hasText("实时磁盘 I/O"))
+        composeRule.onNodeWithText("实时磁盘 I/O").assertIsDisplayed()
+        composeRule.onNodeWithTag("detail_list").performScrollToNode(hasText("40% · Inode 15% · 400 B / 1000 B"))
+        composeRule.onNodeWithText("40% · Inode 15% · 400 B / 1000 B").assertIsDisplayed()
+        composeRule.onNodeWithTag("detail_list").performScrollToNode(hasText("近期告警"))
+        composeRule.onNodeWithText("近期告警").assertIsDisplayed()
+        composeRule.onNodeWithText("prod-api-01 CPU 达到 84%").assertIsDisplayed()
+        composeRule.onNodeWithTag("detail_list").performScrollToNode(hasText("资源概览"))
         composeRule.onNodeWithText("容器与服务").performClick()
         composeRule.onNodeWithText("api-gateway").assertIsDisplayed()
         composeRule.onNodeWithText("CPU 14.2%").assertIsDisplayed()

@@ -50,6 +50,48 @@ interface MetricSampleDao {
     @Query("SELECT * FROM metric_samples WHERE serverId = :serverId AND timestampMs >= :sinceMs ORDER BY timestampMs ASC")
     fun observeRecent(serverId: String, sinceMs: Long): Flow<List<MetricSampleEntity>>
 
+    /**
+     * 按时间桶聚合查询，用于长窗口趋势图（避免把数万条原始采样直接送进 UI）。
+     * 桶内取均值作为曲线值，同时保留峰值供 tooltip 与阈值判断使用。
+     */
+    @Query(
+        """
+        SELECT
+            (timestampMs / :bucketMs) * :bucketMs AS bucketStartMs,
+            AVG(cpuPercent) AS avgCpuPercent,
+            MAX(cpuPercent) AS maxCpuPercent,
+            AVG(memPercent) AS avgMemPercent,
+            MAX(memPercent) AS maxMemPercent,
+            AVG(diskMaxPercent) AS avgDiskPercent,
+            MAX(diskMaxPercent) AS maxDiskPercent,
+            AVG(cpuTempCelsius) AS avgCpuTempCelsius,
+            MAX(cpuTempCelsius) AS maxCpuTempCelsius,
+            AVG(netRxBytesPerSec) AS avgNetRxBytesPerSec,
+            MAX(netRxBytesPerSec) AS maxNetRxBytesPerSec,
+            AVG(netTxBytesPerSec) AS avgNetTxBytesPerSec,
+            MAX(netTxBytesPerSec) AS maxNetTxBytesPerSec,
+            AVG(diskReadBytesPerSec) AS avgDiskReadBytesPerSec,
+            MAX(diskReadBytesPerSec) AS maxDiskReadBytesPerSec,
+            AVG(diskWriteBytesPerSec) AS avgDiskWriteBytesPerSec,
+            MAX(diskWriteBytesPerSec) AS maxDiskWriteBytesPerSec,
+            AVG(swapUsedBytes) AS avgSwapUsedBytes,
+            AVG(swapTotalBytes) AS avgSwapTotalBytes,
+            AVG(load1) AS avgLoad1,
+            MAX(load1) AS maxLoad1,
+            AVG(load5) AS avgLoad5,
+            AVG(load15) AS avgLoad15
+        FROM metric_samples
+        WHERE serverId = :serverId AND timestampMs >= :sinceMs
+        GROUP BY timestampMs / :bucketMs
+        ORDER BY bucketStartMs ASC
+        """
+    )
+    suspend fun getRangeBucketed(
+        serverId: String,
+        sinceMs: Long,
+        bucketMs: Long
+    ): List<MetricBucketRow>
+
     @Query("SELECT * FROM metric_samples WHERE timestampMs >= :sinceMs ORDER BY timestampMs ASC")
     suspend fun getAllSince(sinceMs: Long): List<MetricSampleEntity>
 
@@ -65,6 +107,33 @@ interface MetricSampleDao {
     @Query("DELETE FROM metric_samples")
     suspend fun deleteAll()
 }
+
+/** 分桶聚合结果行；AVG 在整桶为 NULL 时返回 null（如从未上报过温度）。 */
+data class MetricBucketRow(
+    val bucketStartMs: Long,
+    val avgCpuPercent: Double,
+    val maxCpuPercent: Double,
+    val avgMemPercent: Double,
+    val maxMemPercent: Double,
+    val avgDiskPercent: Double,
+    val maxDiskPercent: Double,
+    val avgCpuTempCelsius: Double?,
+    val maxCpuTempCelsius: Double?,
+    val avgNetRxBytesPerSec: Double,
+    val maxNetRxBytesPerSec: Long,
+    val avgNetTxBytesPerSec: Double,
+    val maxNetTxBytesPerSec: Long,
+    val avgDiskReadBytesPerSec: Double,
+    val maxDiskReadBytesPerSec: Long,
+    val avgDiskWriteBytesPerSec: Double,
+    val maxDiskWriteBytesPerSec: Long,
+    val avgSwapUsedBytes: Double,
+    val avgSwapTotalBytes: Double,
+    val avgLoad1: Double,
+    val maxLoad1: Double,
+    val avgLoad5: Double,
+    val avgLoad15: Double
+)
 
 @Dao
 interface AlertRuleDao {

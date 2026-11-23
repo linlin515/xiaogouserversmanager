@@ -265,8 +265,47 @@ data class MetricPoint(
     val memPercent: Double,
     val netRxBytesPerSec: Long,
     val netTxBytesPerSec: Long,
-    val load1: Double
-)
+    val load1: Double,
+    val diskMaxPercent: Double = 0.0,
+    val cpuTempCelsius: Double? = null,
+    val diskReadBytesPerSec: Long = 0L,
+    val diskWriteBytesPerSec: Long = 0L,
+    val swapUsedBytes: Long = 0L,
+    val swapTotalBytes: Long = 0L,
+    val load5: Double = 0.0,
+    val load15: Double = 0.0
+) {
+    val swapPercent: Double
+        get() = if (swapTotalBytes > 0L) {
+            ((swapUsedBytes.toDouble() / swapTotalBytes.toDouble()) * 100.0).coerceIn(0.0, 100.0)
+        } else 0.0
+}
+
+/**
+ * 详情页趋势时间窗口。bucketMs 用于把原始采样按桶聚合，保证图表点数可控。
+ */
+enum class HistoryWindow(val minutes: Int, val label: String, val bucketMs: Long) {
+    LAST_15M(15, "15m", 10_000L),
+    LAST_1H(60, "1h", 30_000L),
+    LAST_6H(360, "6h", 120_000L),
+    LAST_24H(1440, "24h", 300_000L),
+    LAST_48H(2880, "48h", 600_000L);
+
+    companion object {
+        fun fromMinutes(minutes: Int): HistoryWindow =
+            entries.firstOrNull { it.minutes == minutes } ?: LAST_1H
+    }
+}
+
+/** 详情页趋势卡当前展示的指标组。 */
+enum class TrendMetric(val label: String) {
+    CPU_MEM("CPU · 内存"),
+    DISK("磁盘"),
+    TEMP("温度"),
+    DISK_IO("磁盘 I/O"),
+    NETWORK("网络"),
+    LOAD("Load")
+}
 
 data class AlertRule(
     val id: String,

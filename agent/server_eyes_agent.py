@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.2.0"
+VERSION = "1.4.0"
 SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
 IGNORED_FS = {"tmpfs", "devtmpfs", "udev", "overlay", "squashfs", "efivarfs"}
 WHOLE_DISK_RE = re.compile(r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$")
@@ -391,6 +391,18 @@ def read_listening_ports() -> List[Dict[str, Any]]:
     return ports
 
 
+HISTORY_EXTRA_COLUMNS = (
+    ("disk_max_percent", "REAL NOT NULL DEFAULT 0"),
+    ("cpu_temp_celsius", "REAL"),
+    ("disk_read_bps", "INTEGER NOT NULL DEFAULT 0"),
+    ("disk_write_bps", "INTEGER NOT NULL DEFAULT 0"),
+    ("swap_used_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("swap_total_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("load5", "REAL NOT NULL DEFAULT 0"),
+    ("load15", "REAL NOT NULL DEFAULT 0"),
+)
+
+
 class MetricsStore:
     def __init__(self, db_path: str, retention_hours: int = 48) -> None:
         self.db_path = db_path
@@ -405,20 +417,48 @@ class MetricsStore:
                 mem_percent REAL NOT NULL,
                 net_rx_bps INTEGER NOT NULL,
                 net_tx_bps INTEGER NOT NULL,
-                load1 REAL NOT NULL
+                load1 REAL NOT NULL,
+                disk_max_percent REAL NOT NULL DEFAULT 0,
+                cpu_temp_celsius REAL,
+                disk_read_bps INTEGER NOT NULL DEFAULT 0,
+                disk_write_bps INTEGER NOT NULL DEFAULT 0,
+                swap_used_bytes INTEGER NOT NULL DEFAULT 0,
+                swap_total_bytes INTEGER NOT NULL DEFAULT 0,
+                load5 REAL NOT NULL DEFAULT 0,
+                load15 REAL NOT NULL DEFAULT 0
             )
             """
         )
+        # 兼容 1.2.x 及更早版本创建的旧表。
+        existing = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(history)").fetchall()
+        }
+        for column, declaration in HISTORY_EXTRA_COLUMNS:
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE history ADD COLUMN {column} {declaration}"
+                )
         self._conn.commit()
 
     def record(self, snapshot: Dict[str, Any]) -> None:
         mem_total = snapshot.get("memTotalBytes", 0)
         mem_used = snapshot.get("memUsedBytes", 0)
         mem_pct = round((mem_used / mem_total) * 100.0, 2) if mem_total > 0 else 0.0
+        disks = snapshot.get("disks") or []
+        disk_max = max(
+            (float(d.get("usagePercent", 0.0)) for d in disks), default=0.0
+        )
+        temp = snapshot.get("cpuTempCelsius")
         ts = int(snapshot["timestampMs"])
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO history VALUES (?, ?, ?, ?, ?, ?)",
+                """
+                INSERT OR REPLACE INTO history (
+                    timestamp_ms, cpu_percent, mem_percent, net_rx_bps, net_tx_bps,
+                    load1, disk_max_percent, cpu_temp_celsius, disk_read_bps,
+                    disk_write_bps, swap_used_bytes, swap_total_bytes, load5, load15
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     ts,
                     float(snapshot["cpuPercent"]),
@@ -426,6 +466,14 @@ class MetricsStore:
                     int(snapshot["netRxBytesPerSec"]),
                     int(snapshot["netTxBytesPerSec"]),
                     float(snapshot["load1"]),
+                    float(disk_max),
+                    None if temp is None else float(temp),
+                    int(snapshot.get("diskReadBytesPerSec", 0)),
+                    int(snapshot.get("diskWriteBytesPerSec", 0)),
+                    int(snapshot.get("swapUsedBytes", 0)),
+                    int(snapshot.get("swapTotalBytes", 0)),
+                    float(snapshot.get("load5", 0.0)),
+                    float(snapshot.get("load15", 0.0)),
                 ),
             )
             cutoff = ts - self.retention_ms
@@ -436,8 +484,12 @@ class MetricsStore:
         since = int(time.time() * 1000) - max(1, minutes) * 60 * 1000
         with self._lock:
             rows = self._conn.execute(
-                "SELECT timestamp_ms, cpu_percent, mem_percent, net_rx_bps, net_tx_bps, load1 "
-                "FROM history WHERE timestamp_ms >= ? ORDER BY timestamp_ms ASC",
+                """
+                SELECT timestamp_ms, cpu_percent, mem_percent, net_rx_bps, net_tx_bps,
+                       load1, disk_max_percent, cpu_temp_celsius, disk_read_bps,
+                       disk_write_bps, swap_used_bytes, swap_total_bytes, load5, load15
+                FROM history WHERE timestamp_ms >= ? ORDER BY timestamp_ms ASC
+                """,
                 (since,),
             ).fetchall()
         return [
@@ -448,6 +500,14 @@ class MetricsStore:
                 "netRxBytesPerSec": r[3],
                 "netTxBytesPerSec": r[4],
                 "load1": r[5],
+                "diskMaxPercent": r[6],
+                "cpuTempCelsius": r[7],
+                "diskReadBytesPerSec": r[8],
+                "diskWriteBytesPerSec": r[9],
+                "swapUsedBytes": r[10],
+                "swapTotalBytes": r[11],
+                "load5": r[12],
+                "load15": r[13],
             }
             for r in rows
         ]

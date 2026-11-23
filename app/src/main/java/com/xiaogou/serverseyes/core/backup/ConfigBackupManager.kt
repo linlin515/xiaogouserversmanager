@@ -91,7 +91,14 @@ data class BackupMetricSampleDto(
     val netRxBytesPerSec: Long,
     val netTxBytesPerSec: Long,
     val load1: Double,
-    val sourceUsed: String
+    val sourceUsed: String,
+    val cpuTempCelsius: Double? = null,
+    val diskReadBytesPerSec: Long = 0L,
+    val diskWriteBytesPerSec: Long = 0L,
+    val swapUsedBytes: Long = 0L,
+    val swapTotalBytes: Long = 0L,
+    val load5: Double = 0.0,
+    val load15: Double = 0.0
 )
 
 @Serializable
@@ -237,7 +244,14 @@ object ConfigBackupManager {
                     netRxBytesPerSec = m.netRxBytesPerSec,
                     netTxBytesPerSec = m.netTxBytesPerSec,
                     load1 = m.load1,
-                    sourceUsed = m.sourceUsed
+                    sourceUsed = m.sourceUsed,
+                    cpuTempCelsius = m.cpuTempCelsius,
+                    diskReadBytesPerSec = m.diskReadBytesPerSec,
+                    diskWriteBytesPerSec = m.diskWriteBytesPerSec,
+                    swapUsedBytes = m.swapUsedBytes,
+                    swapTotalBytes = m.swapTotalBytes,
+                    load5 = m.load5,
+                    load15 = m.load15
                 )
             }
         )
@@ -405,7 +419,14 @@ object ConfigBackupManager {
                 netRxBytesPerSec = m.netRxBytesPerSec,
                 netTxBytesPerSec = m.netTxBytesPerSec,
                 load1 = m.load1,
-                sourceUsed = m.sourceUsed
+                sourceUsed = m.sourceUsed,
+                cpuTempCelsius = m.cpuTempCelsius,
+                diskReadBytesPerSec = m.diskReadBytesPerSec,
+                diskWriteBytesPerSec = m.diskWriteBytesPerSec,
+                swapUsedBytes = m.swapUsedBytes,
+                swapTotalBytes = m.swapTotalBytes,
+                load5 = m.load5,
+                load15 = m.load15
             )
         }
 

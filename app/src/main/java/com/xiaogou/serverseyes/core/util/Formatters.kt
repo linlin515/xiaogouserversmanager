@@ -1,5 +1,7 @@
 package com.xiaogou.serverseyes.core.util
 
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 object Formatters {
@@ -78,4 +80,17 @@ object Formatters {
             }
         }
     }
+
+    /** 趋势图 X 轴标签：6 小时以内只显示时刻，更长窗口补上日期。 */
+    fun formatAxisTime(timestampMs: Long, spanMinutes: Int): String {
+        val pattern = if (spanMinutes <= 360) "HH:mm" else "MM-dd HH:mm"
+        return SimpleDateFormat(pattern, Locale.US).format(Date(timestampMs))
+    }
+
+    /** 趋势图触摸读数需要精确到秒。 */
+    fun formatClockTime(timestampMs: Long): String =
+        SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(timestampMs))
+
+    fun formatPercent(value: Double, decimals: Int = 0): String =
+        String.format(Locale.US, "%.${decimals.coerceIn(0, 2)}f%%", value)
 }

@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小狗服务器 v1.4 · 节点详情趋势观测原型（方案 A）</title>
+<style>
+  :root {
+    --bg: #0D131A;
+    --surface: #151D27;
+    --subtle: #1D2734;
+    --text: #EEF2F7;
+    --text2: #9AA8BC;
+    --text3: #637082;
+    --border: #263344;
+    --border-strong: #3A4C63;
+    --accent: #5B93FF;
+    --on-accent: #091326;
+    --success: #34D399;
+    --warning: #FBBF24;
+    --error: #F87171;
+    --info: #60A5FA;
+    --info-soft: rgba(96,165,250,.15);
+    --success-soft: rgba(52,211,153,.15);
+    --warning-soft: rgba(251,191,36,.15);
+    --error-soft: rgba(248,113,113,.16);
+    --grid: rgba(38,51,68,.9);
+    --shadow: 0 18px 60px rgba(0,0,0,.45);
+  }
+  html[data-theme="light"] {
+    --bg: #F3F6FA;
+    --surface: #FFFFFF;
+    --subtle: #E9EEF5;
+    --text: #111827;
+    --text2: #4B5565;
+    --text3: #8C96A6;
+    --border: #DCE3ED;
+    --border-strong: #B8C4D4;
+    --accent: #2563EB;
+    --on-accent: #FFFFFF;
+    --success: #047857;
+    --warning: #B45309;
+    --error: #B91C1C;
+    --info: #1D4ED8;
+    --info-soft: rgba(37,99,235,.10);
+    --success-soft: rgba(5,150,105,.10);
+    --warning-soft: rgba(217,119,6,.12);
+    --error-soft: rgba(220,38,38,.10);
+    --grid: rgba(220,227,237,.95);
+    --shadow: 0 18px 50px rgba(17,24,39,.12);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(1200px 700px at 20% -10%, rgba(91,147,255,.14), transparent 60%), var(--bg);
+    color: var(--text);
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 28px 20px 60px;
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(0, 420px) minmax(0, 330px);
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .stage { grid-template-columns: minmax(0, 420px); }
+    .notes { order: 2; }
+  }
+
+  /* ---------- 手机外壳 ---------- */
+  .phone {
+    width: 100%;
+    max-width: 420px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 30px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 940px;
+  }
+  .statusbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 20px 6px; font-size: 12px; color: var(--text2);
+    letter-spacing: .02em;
+  }
+  .statusbar .right { display: flex; gap: 8px; align-items: center; }
+
+  .appbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px 10px;
+  }
+  .iconbtn {
+    width: 40px; height: 40px; border-radius: 12px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid transparent; color: var(--text2);
+    cursor: pointer;
+  }
+  .iconbtn:hover { background: var(--subtle); color: var(--text); }
+  .appbar .title { flex: 1; min-width: 0; }
+  .appbar .title h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+  .appbar .title p { margin: 2px 0 0; font-size: 11px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .scroll {
+    flex: 1; overflow-y: auto; padding: 0 14px 22px;
+    scrollbar-width: thin;
+  }
+  .scroll::-webkit-scrollbar { width: 4px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+
+  /* ---------- 通用卡片 ---------- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .row { display: flex; align-items: center; }
+  .between { justify-content: space-between; }
+  .gap8 { gap: 8px; }
+  .muted { color: var(--text2); }
+  .tiny { font-size: 11px; }
+  .small { font-size: 12px; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .section-title { font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+
+  /* ---------- 节点头部 ---------- */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 9px; border-radius: 999px;
+    font-size: 11px; line-height: 1.35; white-space: nowrap;
+    background: var(--subtle); color: var(--text2);
+    border: 1px solid transparent;
+  }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .chip.ok { color: var(--success); background: var(--success-soft); }
+  .chip.warn { color: var(--warning); background: var(--warning-soft); }
+  .chip.err { color: var(--error); background: var(--error-soft); }
+  .chip.info { color: var(--info); background: var(--info-soft); }
+  .chip.paused { color: var(--warning); background: var(--warning-soft); }
+
+  .updated {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text2);
+  }
+  .updated .spacer { flex: 1; }
+
+  /* 开关 */
+  .switch {
+    position: relative; width: 40px; height: 22px; border-radius: 999px;
+    background: var(--border-strong); border: none; cursor: pointer; padding: 0;
+    transition: background .18s ease;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; transition: transform .18s ease;
+  }
+  .switch[aria-checked="true"] { background: var(--accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(18px); }
+  .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- KPI ---------- */
+  .kpi { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .kpi .cell {
+    background: var(--subtle); border-radius: 12px; padding: 9px 10px;
+    border: 1px solid transparent;
+  }
+  .kpi .cell .label { font-size: 10px; color: var(--text2); letter-spacing: .04em; text-transform: uppercase; }
+  .kpi .cell .value { font-size: 17px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .kpi .cell .sub { font-size: 10px; color: var(--text3); margin-top: 2px; }
+  .kpi .cell.hot .value { color: var(--warning); }
+
+  /* ---------- 分段控件 ---------- */
+  .seg {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    background: var(--subtle); border-radius: 12px; padding: 3px; gap: 3px;
+    margin-bottom: 12px;
+  }
+  .seg button {
+    border: none; background: transparent; color: var(--text2);
+    font-size: 12px; padding: 8px 4px; border-radius: 9px; cursor: pointer;
+    font-family: inherit;
+  }
+  .seg button[aria-selected="true"] { background: var(--surface); color: var(--text); font-weight: 600; }
+
+  /* ---------- 趋势卡 ---------- */
+  .trend-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .live-wrap { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text2); }
+  .chip-row {
+    display: flex; gap: 6px; overflow-x: auto; padding: 10px 0 2px;
+    scrollbar-width: none;
+  }
+  .chip-row::-webkit-scrollbar { display: none; }
+  .sel {
+    border: 1px solid transparent; background: var(--subtle); color: var(--text2);
+    font-size: 11px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+    white-space: nowrap; font-family: inherit; line-height: 1.4;
+  }
+  .sel[aria-pressed="true"] {
+    background: var(--info-soft); color: var(--accent); border-color: rgba(91,147,255,.35);
+    font-weight: 600;
+  }
+  .sel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .chart-wrap { position: relative; margin-top: 6px; }
+  .chart-wrap svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .12s ease;
+    background: var(--subtle); border: 1px solid var(--border-strong);
+    border-radius: 10px; padding: 7px 9px; font-size: 11px; line-height: 1.5;
+    box-shadow: 0 8px 24px rgba(0,0,0,.28); min-width: 118px; z-index: 4;
+  }
+  .tooltip.show { opacity: 1; }
+  .tooltip .t { color: var(--text2); font-size: 10px; }
+  .tooltip .v { display: flex; justify-content: space-between; gap: 12px; font-variant-numeric: tabular-nums; }
+  .tooltip .v b { font-weight: 600; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 11px; color: var(--text2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 14px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
+  .legend i.dash { border-top-style: dashed; }
+  .legend b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .chart-state {
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; min-height: 186px; text-align: center; padding: 16px;
+    color: var(--text2); font-size: 12px; line-height: 1.6;
+  }
+  .chart-state b { color: var(--text); font-size: 13px; }
+  .chart-state button {
+    margin-top: 4px; border: 1px solid var(--border-strong); background: transparent;
+    color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 12px;
+    cursor: pointer; font-family: inherit; min-height: 34px;
+  }
+  .skeleton { display: none; min-height: 186px; padding-top: 8px; }
+  .skeleton .bar {
+    height: 10px; border-radius: 6px; margin-bottom: 9px;
+    background: linear-gradient(90deg, var(--subtle) 25%, var(--border) 37%, var(--subtle) 63%);
+    background-size: 400% 100%; animation: shimmer 1.4s ease infinite;
+  }
+  .skeleton .plot {
+    height: 120px; border-radius: 10px; margin-top: 14px;
+    background: linear-gradient(90deg, var(--subtle) 25%, var(--border) 37%, var(--subtle) 63%);
+    background-size: 400% 100%; animation: shimmer 1.4s ease infinite;
+  }
+  @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton .bar, .skeleton .plot { animation: none; }
+  }
+
+  [data-state="loading"] .chart-wrap,
+  [data-state="loading"] .legend,
+  [data-state="empty"] .chart-wrap,
+  [data-state="empty"] .legend,
+  [data-state="error"] .chart-wrap,
+  [data-state="error"] .legend { display: none; }
+  [data-state="loading"] .skeleton { display: block; }
+  [data-state="empty"] .chart-state.empty { display: flex; }
+  [data-state="error"] .chart-state.error { display: flex; }
+
+  /* ---------- 告警时间线 ---------- */
+  .timeline { margin-top: 10px; display: flex; flex-direction: column; gap: 12px; }
+  .tl-item { display: grid; grid-template-columns: 14px 1fr; gap: 9px; }
+  .tl-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; background: var(--text3); }
+  .tl-dot.warning { background: var(--warning); }
+  .tl-dot.critical { background: var(--error); }
+  .tl-dot.ok { background: var(--success); }
+  .tl-body .line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .tl-body .msg { font-size: 12px; color: var(--text); }
+  .tl-body .meta { font-size: 10px; color: var(--text3); margin-top: 2px; }
+
+  /* ---------- 进程 ---------- */
+  .proc { display: flex; flex-direction: column; gap: 11px; margin-top: 10px; }
+  .proc-item .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .proc-item .name { font-size: 12px; font-weight: 600; }
+  .proc-item .name em { font-style: normal; color: var(--text3); font-weight: 400; font-size: 10px; margin-left: 4px; }
+  .proc-item .nums { font-size: 11px; color: var(--text2); font-variant-numeric: tabular-nums; }
+  .bar-track { height: 4px; border-radius: 999px; background: var(--subtle); margin-top: 6px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 999px; background: var(--accent); }
+  .bar-fill.warn { background: var(--warning); }
+  .bar-fill.err { background: var(--error); }
+
+  /* ---------- 说明侧栏 ---------- */
+  .notes h2 { font-size: 15px; margin: 0 0 4px; }
+  .notes p.lead { color: var(--text2); font-size: 12px; line-height: 1.7; margin: 0 0 16px; }
+  .note-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 13px 14px; margin-bottom: 10px;
+  }
+  .note-card h3 { margin: 0 0 7px; font-size: 12px; letter-spacing: .03em; color: var(--text2); font-weight: 600; }
+  .note-card ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.75; color: var(--text); }
+  .note-card li::marker { color: var(--accent); }
+  .note-card li + li { margin-top: 2px; }
+  .note-card .kbd {
+    display: inline-block; padding: 1px 6px; border-radius: 5px;
+    border: 1px solid var(--border-strong); font-size: 10px; color: var(--text2);
+  }
+  .theme-toggle {
+    display: flex; gap: 8px; margin-bottom: 14px;
+  }
+  .theme-toggle button {
+    flex: 1; min-height: 38px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    font-size: 12px; font-family: inherit;
+  }
+  .theme-toggle button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--info-soft); }
+  .state-btns { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .state-btns button {
+    min-height: 36px; border-radius: 10px; cursor: pointer; font-size: 12px; font-family: inherit;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  }
+  .state-btns button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--info-soft); }
+
+  .err-banner {
+    display: none; align-items: flex-start; gap: 10px;
+    background: var(--error-soft); border: 1px solid rgba(248,113,113,.35);
+    border-radius: 14px; padding: 11px 12px; margin-bottom: 12px;
+  }
+  .err-banner.show { display: flex; }
+  .err-banner .txt { flex: 1; }
+  .err-banner b { display: block; font-size: 12px; margin-bottom: 2px; }
+  .err-banner p { margin: 0; font-size: 11px; color: var(--text2); line-height: 1.5; }
+  .err-banner button {
+    border: 1px solid var(--border-strong); background: transparent; color: var(--text);
+    border-radius: 999px; padding: 5px 11px; font-size: 11px; cursor: pointer; font-family: inherit;
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <!-- ============ 手机原型 ============ -->
+  <main class="phone" aria-label="节点详情页原型">
+    <div class="statusbar">
+      <span>9:41</span>
+      <span class="right"><span>5G</span><span>82%</span></span>
+    </div>
+
+    <div class="appbar">
+      <button class="iconbtn" title="返回" aria-label="返回">←</button>
+      <div class="title">
+        <h1>prod-api-01</h1>
+        <p>10.0.0.1 · Ubuntu 24.04 LTS · 运行 23 天 4 小时</p>
+      </div>
+      <button class="iconbtn" title="置顶" aria-label="置顶">📌</button>
+      <button class="iconbtn" title="刷新" aria-label="立即刷新">⟳</button>
+      <button class="iconbtn" title="编辑" aria-label="编辑节点">✎</button>
+    </div>
+
+    <div class="scroll">
+      <div class="err-banner" id="errBanner">
+        <div class="txt">
+          <b>采集失败</b>
+          <p>无法连接到节点，请检查网络或跳板机配置。</p>
+        </div>
+        <button type="button" onclick="setState('normal')">重试</button>
+      </div>
+
+      <!-- 节点头部 -->
+      <section class="card">
+        <div class="chips" style="margin-top:0">
+          <span class="chip ok"><span class="dot"></span>在线</span>
+          <span class="chip info">Agent · 12ms</span>
+          <span class="chip">混合模式</span>
+          <span class="chip warn">54.5°C</span>
+        </div>
+        <div class="updated">
+          <span id="updatedText">更新于 3 秒前</span>
+          <span class="spacer"></span>
+          <span>暂停采集</span>
+          <button class="switch" id="pauseSwitch" role="switch" aria-checked="false" aria-label="暂停采集"></button>
+        </div>
+      </section>
+
+      <!-- KPI 速览 -->
+      <div class="kpi" aria-label="关键指标速览">
+        <div class="cell"><div class="label">CPU</div><div class="value">42%</div><div class="sub">8 核</div></div>
+        <div class="cell"><div class="label">内存</div><div class="value">68%</div><div class="sub">10.8 / 16 GB</div></div>
+        <div class="cell"><div class="label">磁盘</div><div class="value">74%</div><div class="sub">/ 根分区</div></div>
+        <div class="cell hot"><div class="label">温度</div><div class="value">54.5°C</div><div class="sub">正常</div></div>
+        <div class="cell"><div class="label">Load 1</div><div class="value">1.24</div><div class="sub">1/5/15: 1.2/1.0/0.9</div></div>
+        <div class="cell"><div class="label">下行</div><div class="value">2.1<span class="small muted"> MB/s</span></div><div class="sub">上行 480 KB/s</div></div>
+      </div>
+
+      <!-- 子 Tab -->
+      <div class="seg" role="tablist" aria-label="详情分区">
+        <button role="tab" aria-selected="true">资源概览</button>
+        <button role="tab" aria-selected="false">容器与服务</button>
+        <button role="tab" aria-selected="false">日志与诊断</button>
+      </div>
+
+      <!-- 趋势卡 -->
+      <section class="card" id="trendCard" data-state="normal">
+        <div class="trend-head">
+          <span class="section-title">性能趋势</span>
+          <div class="live-wrap">
+            <span>实时</span>
+            <button class="switch" id="liveSwitch" role="switch" aria-checked="true" aria-label="实时刷新"></button>
+          </div>
+        </div>
+
+        <div class="chip-row" id="metricChips" role="group" aria-label="指标选择"></div>
+        <div class="chip-row" id="windowChips" role="group" aria-label="时间窗口"></div>
+
+        <div class="chart-wrap" id="chartWrap">
+          <svg id="chart" viewBox="0 0 352 186" role="img" aria-labelledby="chartDesc"></svg>
+          <div class="tooltip" id="tooltip"></div>
+        </div>
+
+        <div class="skeleton" aria-hidden="true">
+          <div class="bar" style="width:42%"></div>
+          <div class="bar" style="width:64%"></div>
+          <div class="plot"></div>
+        </div>
+
+        <div class="chart-state empty">
+          <b id="emptyTitle">暂无历史采样</b>
+          <span>节点刚接入或采集被暂停，历史曲线会在下一次采样后出现。</span>
+          <button type="button" onclick="setState('normal')">立即刷新</button>
+        </div>
+        <div class="chart-state error">
+          <b>趋势数据加载失败</b>
+          <span>无法读取该节点的历史采样，请稍后重试。</span>
+          <button type="button" onclick="setState('normal')">重试</button>
+        </div>
+
+        <div class="legend" id="legend"></div>
+      </section>
+
+      <!-- 历史告警 -->
+      <section class="card">
+        <div class="row between">
+          <span class="section-title">近期告警</span>
+          <span class="tiny muted">最近 24 小时</span>
+        </div>
+        <div class="timeline">
+          <div class="tl-item">
+            <span class="tl-dot critical"></span>
+            <div class="tl-body">
+              <div class="line1">
+                <span class="msg">CPU 达到 96%</span>
+                <span class="chip err">严重</span>
+              </div>
+              <div class="meta">今天 14:32 · 阈值 95% · 已恢复 14:41</div>
+            </div>
+          </div>
+          <div class="tl-item">
+            <span class="tl-dot warning"></span>
+            <div class="tl-body">
+              <div class="line1">
+                <span class="msg">内存达到 88%</span>
+                <span class="chip warn">警告</span>
+              </div>
+              <div class="meta">今天 11:08 · 阈值 85% · 已恢复 11:26</div>
+            </div>
+          </div>
+          <div class="tl-item">
+            <span class="tl-dot ok"></span>
+            <div class="tl-body">
+              <div class="line1">
+                <span class="msg">磁盘使用率恢复到 74%</span>
+                <span class="chip ok">已恢复</span>
+              </div>
+              <div class="meta">昨天 22:15 · 峰值 91%</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Top 进程 -->
+      <section class="card">
+        <div class="row between">
+          <span class="section-title">Top 进程</span>
+          <span class="tiny muted">按 CPU 排序</span>
+        </div>
+        <div class="chip-row" id="procChips" role="group" aria-label="进程排序">
+          <button class="sel" aria-pressed="true">CPU ↓</button>
+          <button class="sel" aria-pressed="false">内存 ↓</button>
+        </div>
+        <div class="proc" id="procList"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ============ 说明侧栏 ============ -->
+  <aside class="notes">
+    <h2>v1.4 · 详情页趋势观测</h2>
+    <p class="lead">方案 A · Ops Precision 增量原型。请重点确认趋势卡的信息密度、交互方式与状态覆盖。</p>
+
+    <div class="theme-toggle">
+      <button type="button" id="themeDark" aria-pressed="true">深色</button>
+      <button type="button" id="themeLight" aria-pressed="false">浅色</button>
+    </div>
+
+    <div class="note-card">
+      <h3>状态演示</h3>
+      <div class="state-btns">
+        <button type="button" data-state-btn="normal" aria-pressed="true">正常</button>
+        <button type="button" data-state-btn="loading" aria-pressed="false">加载中</button>
+        <button type="button" data-state-btn="empty" aria-pressed="false">空数据</button>
+        <button type="button" data-state-btn="error" aria-pressed="false">趋势失败</button>
+        <button type="button" data-state-btn="banner" aria-pressed="false" style="grid-column: span 2">采集失败（顶部横幅）</button>
+      </div>
+    </div>
+
+    <div class="note-card">
+      <h3>趋势卡交互</h3>
+      <ul>
+        <li>指标 chips 切换 <b>CPU·内存 / 磁盘 / 温度 / 磁盘 I/O / 网络 / Load</b>，同一张卡内切换，不堆叠多张图。</li>
+        <li>窗口 chips 切换 15m / 1h / 6h / 24h / 48h，X 轴时间标签随窗口自适应（≤6h 显示 <span class="kbd">HH:mm</span>，更长补日期）。</li>
+        <li>在图上<b>横向拖动</b>显示十字准线与读数气泡；松手 1.5 秒后自动淡出。</li>
+        <li>「实时」开关打开时曲线随采样增量追加并自动左移；关闭后窗口固定。</li>
+        <li>告警阈值以虚线画在图上并带文字标签（如「警告 80%」），不只靠颜色区分。</li>
+      </ul>
+    </div>
+
+    <div class="note-card">
+      <h3>数据与性能</h3>
+      <ul>
+        <li>本地历史按窗口分桶聚合（15m→10s、1h→30s、6h→2m、24h→5m、48h→10m），单序列最多约 400 点。</li>
+        <li>实时模式只追加新采样点，不再每轮全量重查；离开详情页即停止。</li>
+        <li>新增温度、磁盘 I/O、Swap、Load5/15 历史字段（Room v4 迁移），旧数据以 0/空值兜底。</li>
+      </ul>
+    </div>
+
+    <div class="note-card">
+      <h3>状态与无障碍</h3>
+      <ul>
+        <li>首次加载显示骨架；刷新时保留旧曲线，不闪白。</li>
+        <li>无历史数据时说明原因并给「立即刷新」入口；失败时给重试。</li>
+        <li>图表提供动态朗读摘要（指标、区间、峰值、均值）；图例同时用颜色、线型与文字区分。</li>
+        <li>所有可点区域 ≥ 40dp，Chrome 下可用键盘 Tab 聚焦 chips 与开关。</li>
+      </ul>
+    </div>
+
+    <div class="note-card">
+      <h3>待确认点</h3>
+      <ul>
+        <li>KPI 是否保留 6 格（3×2），还是压缩为横向滚动一行？</li>
+        <li>「实时」默认开启还是默认关闭（省电优先）？</li>
+        <li>告警时间线放在概览页，还是并入「日志与诊断」页？</li>
+      </ul>
+    </div>
+  </aside>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------------- 指标配置 ---------------- */
+  const METRICS = {
+    cpu: {
+      label: "CPU · 内存",
+      yMax: 100,
+      unit: "%",
+      series: [
+        { key: "cpu", name: "CPU", color: "var(--accent)", dash: false, fill: true },
+        { key: "mem", name: "内存", color: "var(--success)", dash: true, fill: false }
+      ],
+      thresholds: [
+        { value: 80, label: "警告 80%", color: "var(--warning)" },
+        { value: 95, label: "严重 95%", color: "var(--error)" }
+      ]
+    },
+    disk: {
+      label: "磁盘",
+      yMax: 100,
+      unit: "%",
+      series: [{ key: "disk", name: "磁盘使用率", color: "var(--info)", dash: false, fill: true }],
+      thresholds: [
+        { value: 85, label: "警告 85%", color: "var(--warning)" },
+        { value: 95, label: "严重 95%", color: "var(--error)" }
+      ]
+    },
+    temp: {
+      label: "温度",
+      yMax: 100,
+      unit: "°C",
+      series: [{ key: "temp", name: "CPU 温度", color: "var(--warning)", dash: false, fill: true }],
+      thresholds: [{ value: 80, label: "高温 80°C", color: "var(--error)" }]
+    },
+    diskio: {
+      label: "磁盘 I/O",
+      yMax: null,
+      unit: "MB/s",
+      series: [
+        { key: "read", name: "读", color: "var(--accent)", dash: false, fill: true },
+        { key: "write", name: "写", color: "var(--warning)", dash: true, fill: false }
+      ],
+      thresholds: []
+    },
+    net: {
+      label: "网络",
+      yMax: null,
+      unit: "KB/s",
+      series: [
+        { key: "rx", name: "RX", color: "var(--accent)", dash: false, fill: true },
+        { key: "tx", name: "TX", color: "var(--warning)", dash: true, fill: false }
+      ],
+      thresholds: []
+    },
+    load: {
+      label: "Load",
+      yMax: null,
+      unit: "",
+      series: [
+        { key: "load1", name: "Load 1", color: "var(--info)", dash: false, fill: true },
+        { key: "load5", name: "Load 5", color: "var(--success)", dash: true, fill: false }
+      ],
+      thresholds: []
+    }
+  };
+
+  const WINDOWS = [
+    { key: "15m", label: "15m", minutes: 15 },
+    { key: "1h", label: "1h", minutes: 60 },
+    { key: "6h", label: "6h", minutes: 360 },
+    { key: "24h", label: "24h", minutes: 1440 },
+    { key: "48h", label: "48h", minutes: 2880 }
+  ];
+
+  const state = {
+    metric: "cpu",
+    window: "1h",
+    live: true,
+    paused: false,
+    procSort: "cpu",
+    hoverIndex: -1,
+    data: {},
+    timer: null,
+    hideTimer: null
+  };
+
+  /* ---------------- 伪随机数据（可复现） ---------------- */
+  function seeded(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function () {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+
+  function makeSeries(metricKey, windowKey, points) {
+    const rnd = seeded(metricKey.length * 7919 + windowKey.length * 104729 + 13);
+    const bases = {
+      cpu: [42, 68], disk: [74], temp: [54], diskio: [38, 22], net: [2100, 480], load: [1.24, 1.0]
+    }[metricKey];
+    const amps = {
+      cpu: [26, 12], disk: [5], temp: [9], diskio: [30, 18], net: [1600, 420], load: [0.9, 0.5]
+    }[metricKey];
+    return bases.map(function (base, si) {
+      let v = base;
+      const out = [];
+      for (let i = 0; i < points; i++) {
+        v += (rnd() - 0.5) * amps[si] * 0.55;
+        const lo = metricKey === "temp" ? 34 : 0;
+        const hi = metricKey === "disk" ? 96 : metricKey === "temp" ? 88 : 99;
+        v = Math.max(lo, Math.min(hi, v));
+        // 让第一条曲线保留一个明显的尖峰，便于观察阈值线
+        if (si === 0 && metricKey === "cpu" && i === Math.floor(points * 0.62)) v = 96.4;
+        if (si === 0 && metricKey === "temp" && i === Math.floor(points * 0.55)) v = 79.2;
+        out.push(v);
+      }
+      return out;
+    });
+  }
+
+  function ensureData() {
+    const key = state.metric + "|" + state.window;
+    if (!state.data[key]) {
+      state.data[key] = makeSeries(state.metric, state.window, 56);
+    }
+    return state.data[key];
+  }
+
+  function windowStartMs() {
+    const w = WINDOWS.find(function (x) { return x.key === state.window; });
+    return Date.now() - w.minutes * 60000;
+  }
+
+  /* ---------------- chips ---------------- */
+  const metricChips = document.getElementById("metricChips");
+  Object.keys(METRICS).forEach(function (key) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "sel";
+    b.textContent = METRICS[key].label;
+    b.setAttribute("aria-pressed", String(key === state.metric));
+    b.addEventListener("click", function () {
+      state.metric = key;
+      Array.from(metricChips.children).forEach(function (c) {
+        c.setAttribute("aria-pressed", String(c === b));
+      });
+      hideTooltip();
+      render();
+    });
+    metricChips.appendChild(b);
+  });
+
+  const windowChips = document.getElementById("windowChips");
+  WINDOWS.forEach(function (w) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "sel";
+    b.textContent = w.label;
+    b.setAttribute("aria-pressed", String(w.key === state.window));
+    b.addEventListener("click", function () {
+      state.window = w.key;
+      Array.from(windowChips.children).forEach(function (c) {
+        c.setAttribute("aria-pressed", String(c === b));
+      });
+      hideTooltip();
+      render();
+    });
+    windowChips.appendChild(b);
+  });
+
+  /* ---------------- 图表 ---------------- */
+  const svg = document.getElementById("chart");
+  const tooltip = document.getElementById("tooltip");
+  const legend = document.getElementById("legend");
+  const chartWrap = document.getElementById("chartWrap");
+  const chartDesc = document.createElement("desc");
+  chartDesc.id = "chartDesc";
+  svg.appendChild(chartDesc);
+
+  const PAD = { left: 38, right: 8, top: 12, bottom: 24 };
+  const W = 352, H = 186;
+
+  function niceMax(raw) {
+    if (raw <= 0) return 1;
+    const exp = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / exp;
+    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return step * exp;
+  }
+
+  function fmt(v, unit) {
+    if (unit === "%") return Math.round(v) + "%";
+    if (unit === "°C") return v.toFixed(1) + "°C";
+    if (unit === "MB/s") return v.toFixed(1);
+    if (unit === "KB/s") return Math.round(v).toLocaleString("en-US");
+    return v.toFixed(2);
+  }
+
+  function xLabels(startMs) {
+    const w = WINDOWS.find(function (x) { return x.key === state.window; });
+    const end = startMs + w.minutes * 60000;
+    const count = 4;
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const t = startMs + (end - startMs) * (i / (count - 1));
+      const d = new Date(t);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const label = w.minutes <= 360
+        ? hh + ":" + mm
+        : (d.getMonth() + 1) + "-" + String(d.getDate()).padStart(2, "0") + " " + hh + ":" + mm;
+      out.push({ x: PAD.left + (W - PAD.left - PAD.right) * (i / (count - 1)), label: label });
+    }
+    return out;
+  }
+
+  function buildPath(values, max, plotW, plotH) {
+    const step = values.length > 1 ? plotW / (values.length - 1) : plotW;
+    let d = "";
+    const pts = [];
+    values.forEach(function (v, i) {
+      const x = PAD.left + step * i;
+      const y = PAD.top + plotH - (Math.max(0, Math.min(v, max)) / max) * plotH;
+      d += (i === 0 ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
+      pts.push({ x: x, y: y });
+    });
+    return { d: d.trim(), pts: pts, step: step };
+  }
+
+  function render() {
+    const cfg = METRICS[state.metric];
+    const data = ensureData();
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top - PAD.bottom;
+
+    let max;
+    if (cfg.yMax) {
+      max = cfg.yMax;
+    } else {
+      const flat = data.reduce(function (a, s) { return a.concat(s); }, []);
+      max = niceMax(Math.max.apply(null, flat) * 1.18);
+    }
+
+    const parts = [];
+    // 网格与 Y 刻度
+    const ticks = 4;
+    for (let i = 0; i <= ticks; i++) {
+      const frac = i / ticks;
+      const y = PAD.top + plotH - frac * plotH;
+      const val = max * frac;
+      parts.push('<line x1="' + PAD.left + '" y1="' + y.toFixed(1) + '" x2="' + (W - PAD.right) +
+        '" y2="' + y.toFixed(1) + '" stroke="var(--grid)" stroke-width="1" stroke-dasharray="' +
+        (i === 0 ? "0" : "4 5") + '"/>');
+      parts.push('<text x="' + (PAD.left - 7) + '" y="' + (y + 3.5).toFixed(1) +
+        '" text-anchor="end" font-size="9" fill="var(--text3)" font-family="inherit">' +
+        (cfg.unit === "KB/s" ? Math.round(val).toLocaleString("en-US") : (val % 1 === 0 ? val : val.toFixed(1))) +
+        '</text>');
+    }
+
+    // 阈值线
+    cfg.thresholds.forEach(function (th) {
+      if (th.value > max) return;
+      const y = PAD.top + plotH - (th.value / max) * plotH;
+      parts.push('<line x1="' + PAD.left + '" y1="' + y.toFixed(1) + '" x2="' + (W - PAD.right) +
+        '" y2="' + y.toFixed(1) + '" stroke="' + th.color + '" stroke-width="1.2" stroke-dasharray="7 5" opacity=".85"/>');
+      parts.push('<text x="' + (W - PAD.right - 2) + '" y="' + (y - 4).toFixed(1) +
+        '" text-anchor="end" font-size="8.5" fill="' + th.color + '" font-family="inherit">' + th.label + '</text>');
+    });
+
+    // 序列
+    const paths = data.map(function (values, si) {
+      const spec = cfg.series[si];
+      const built = buildPath(values, max, plotW, plotH);
+      if (spec.fill) {
+        const area = built.d + " L" + (PAD.left + plotW) + " " + (PAD.top + plotH) +
+          " L" + PAD.left + " " + (PAD.top + plotH) + " Z";
+        parts.push('<defs><linearGradient id="g' + si + '" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0%" stop-color="' + spec.color + '" stop-opacity=".24"/>' +
+          '<stop offset="100%" stop-color="' + spec.color + '" stop-opacity="0"/></linearGradient></defs>');
+        parts.push('<path d="' + area + '" fill="url(#g' + si + ')"/>');
+      }
+      parts.push('<path d="' + built.d + '" fill="none" stroke="' + spec.color +
+        '" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"' +
+        (spec.dash ? ' stroke-dasharray="6 4"' : "") + '/>');
+      return built;
+    });
+
+    // X 轴标签
+    const start = windowStartMs();
+    const labels = xLabels(start);
+    labels.forEach(function (l, i) {
+      const anchor = i === 0 ? "start" : i === labels.length - 1 ? "end" : "middle";
+      parts.push('<text x="' + l.x.toFixed(1) + '" y="' + (H - 6) +
+        '" text-anchor="' + anchor + '" font-size="9" fill="var(--text3)" font-family="inherit">' + l.label + '</text>');
+    });
+
+    // 十字准线层
+    parts.push('<g id="crosshair" style="opacity:0">' +
+      '<line id="crossLine" x1="0" y1="' + PAD.top + '" x2="0" y2="' + (PAD.top + plotH) +
+      '" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="3 3"/>' +
+      data.map(function (_, si) {
+        return '<circle id="crossDot' + si + '" r="3.2" fill="' + cfg.series[si].color +
+          '" stroke="var(--surface)" stroke-width="1.5"/>';
+      }).join("") +
+      '</g>');
+
+    svg.innerHTML = "";
+    svg.appendChild(chartDesc);
+    svg.insertAdjacentHTML("beforeend", parts.join(""));
+
+    // 无障碍摘要
+    const flat = data[0];
+    const peak = Math.max.apply(null, flat);
+    const avg = flat.reduce(function (a, b) { return a + b; }, 0) / flat.length;
+    const winLabel = WINDOWS.find(function (w) { return w.key === state.window; }).label;
+    chartDesc.textContent = cfg.series[0].name + "，最近 " + winLabel +
+      "，峰值 " + fmt(peak, cfg.unit) + "，均值 " + fmt(avg, cfg.unit) + "。";
+    svg.setAttribute("aria-label", chartDesc.textContent);
+
+    const emptyTitle = document.getElementById("emptyTitle");
+    if (emptyTitle) emptyTitle.textContent = "暂无 " + winLabel + " 历史采样";
+
+    // 图例
+    const last = data.map(function (s) { return s[s.length - 1]; });
+    legend.innerHTML = cfg.series.map(function (spec, si) {
+      return '<span style="color:' + spec.color + '"><i class="' + (spec.dash ? "dash" : "") + '"></i>' +
+        spec.name + ' <b style="color:var(--text)">' + fmt(last[si], cfg.unit) +
+        (cfg.unit === "KB/s" || cfg.unit === "MB/s" ? " " + cfg.unit : "") + '</b></span>';
+    }).join("") +
+      (cfg.thresholds.length
+        ? '<span style="color:var(--text3)">虚线为告警阈值</span>'
+        : "");
+
+    attachPointer(paths, data, max, cfg);
+  }
+
+  /* ---------------- 十字准线与读数 ---------------- */
+  function attachPointer(paths, data, max, cfg) {
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top - PAD.bottom;
+
+    function onMove(ev) {
+      const rect = svg.getBoundingClientRect();
+      const px = ((ev.clientX - rect.left) / rect.width) * W;
+      const ratio = (px - PAD.left) / plotW;
+      if (ratio < -0.03 || ratio > 1.03) { hideTooltip(); return; }
+      const count = data[0].length;
+      const idx = Math.max(0, Math.min(count - 1, Math.round(ratio * (count - 1))));
+      showTooltip(idx, data, max, cfg, plotH);
+    }
+
+    svg.onpointermove = onMove;
+    svg.onpointerdown = function (ev) { ev.preventDefault(); onMove(ev); };
+    svg.onpointerleave = function () { hideTooltip(); };
+    svg.ontouchmove = function (ev) {
+      if (ev.touches && ev.touches[0]) onMove(ev.touches[0]);
+    };
+  }
+
+  function showTooltip(idx, data, max, cfg, plotH) {
+    const count = data[0].length;
+    const plotW = W - PAD.left - PAD.right;
+    const x = PAD.left + (count > 1 ? plotW / (count - 1) : plotW) * idx;
+
+    const g = document.getElementById("crosshair");
+    if (g) g.style.opacity = "1";
+    const line = document.getElementById("crossLine");
+    if (line) { line.setAttribute("x1", x); line.setAttribute("x2", x); }
+
+    data.forEach(function (series, si) {
+      const dot = document.getElementById("crossDot" + si);
+      if (!dot) return;
+      const y = PAD.top + plotH - (Math.max(0, Math.min(series[idx], max)) / max) * plotH;
+      dot.setAttribute("cx", x);
+      dot.setAttribute("cy", y);
+    });
+
+    const w = WINDOWS.find(function (it) { return it.key === state.window; });
+    const start = windowStartMs();
+    const ts = start + (w.minutes * 60000) * (idx / Math.max(1, count - 1));
+    const d = new Date(ts);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    const datePrefix = w.minutes > 360
+      ? (d.getMonth() + 1) + "-" + String(d.getDate()).padStart(2, "0") + " "
+      : "";
+
+    tooltip.innerHTML = '<div class="t">' + datePrefix + hh + ":" + mm + ":" + ss + "</div>" +
+      data.map(function (series, si) {
+        return '<div class="v"><span style="color:' + cfg.series[si].color + '">' +
+          cfg.series[si].name + '</span><b>' + fmt(series[idx], cfg.unit) +
+          (cfg.unit === "KB/s" || cfg.unit === "MB/s" ? " " + cfg.unit : "") + "</b></div>";
+      }).join("");
+    tooltip.classList.add("show");
+
+    const wrapRect = chartWrap.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const scale = svgRect.width / W;
+    const scaleY = svgRect.height / H;
+    let left = x * scale + 12;
+    const tw = 128;
+    if (left + tw > wrapRect.width) left = x * scale - tw - 12;
+
+    // 纵向跟随读数点，避免始终压在阈值标签上
+    const ys = data.map(function (series) {
+      return PAD.top + plotH - (Math.max(0, Math.min(series[idx], max)) / max) * plotH;
+    });
+    const avgY = ys.reduce(function (a, b) { return a + b; }, 0) / ys.length;
+    let top = avgY * scaleY - 30;
+    top = Math.max(4, Math.min(top, wrapRect.height - 72));
+
+    tooltip.style.left = Math.max(4, left) + "px";
+    tooltip.style.top = top + "px";
+
+    clearTimeout(state.hideTimer);
+    state.hideTimer = setTimeout(hideTooltip, 1500);
+  }
+
+  function hideTooltip() {
+    const g = document.getElementById("crosshair");
+    if (g) g.style.opacity = "0";
+    tooltip.classList.remove("show");
+  }
+
+  /* ---------------- 进程列表 ---------------- */
+  const PROCS = [
+    { name: "java", pid: 1287, user: "app", cpu: 32.4, mem: 21.8 },
+    { name: "nginx", pid: 903, user: "www-data", cpu: 12.5, mem: 3.2 },
+    { name: "postgres", pid: 1042, user: "postgres", cpu: 8.1, mem: 14.6 },
+    { name: "node", pid: 2210, user: "deploy", cpu: 6.7, mem: 9.4 },
+    { name: "dockerd", pid: 776, user: "root", cpu: 3.2, mem: 2.1 }
+  ];
+
+  const procChips = document.getElementById("procChips");
+  Array.from(procChips.children).forEach(function (btn, i) {
+    btn.addEventListener("click", function () {
+      state.procSort = i === 0 ? "cpu" : "mem";
+      Array.from(procChips.children).forEach(function (c) {
+        c.setAttribute("aria-pressed", String(c === btn));
+      });
+      renderProcs();
+    });
+  });
+
+  function renderProcs() {
+    const list = PROCS.slice().sort(function (a, b) {
+      return state.procSort === "cpu" ? b.cpu - a.cpu : b.mem - a.mem;
+    });
+    const maxVal = Math.max.apply(null, list.map(function (p) {
+      return state.procSort === "cpu" ? p.cpu : p.mem;
+    }));
+    document.getElementById("procList").innerHTML = list.map(function (p) {
+      const v = state.procSort === "cpu" ? p.cpu : p.mem;
+      const pct = Math.max(4, (v / maxVal) * 100);
+      const tone = v >= 50 ? "err" : v >= 25 ? "warn" : "";
+      return '<div class="proc-item">' +
+        '<div class="top"><span class="name">' + p.name + '<em>PID ' + p.pid + "</em></span>" +
+        '<span class="nums">CPU ' + p.cpu.toFixed(1) + "% · MEM " + p.mem.toFixed(1) + "%</span></div>" +
+        '<div class="bar-track"><div class="bar-fill ' + tone + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+        "</div>";
+    }).join("");
+    document.querySelector(".proc").setAttribute("aria-label", "进程列表，按" + (state.procSort === "cpu" ? "CPU" : "内存") + "降序");
+  }
+
+  /* ---------------- 开关与状态 ---------------- */
+  const pauseSwitch = document.getElementById("pauseSwitch");
+  pauseSwitch.addEventListener("click", function () {
+    state.paused = !state.paused;
+    pauseSwitch.setAttribute("aria-checked", String(state.paused));
+    const chipRow = document.querySelector(".chips");
+    const existing = chipRow.querySelector(".chip.paused");
+    if (state.paused) {
+      if (!existing) {
+        const c = document.createElement("span");
+        c.className = "chip paused";
+        c.textContent = "已暂停采集";
+        chipRow.appendChild(c);
+      }
+      document.getElementById("updatedText").textContent = "采集已暂停";
+    } else {
+      if (existing) existing.remove();
+      document.getElementById("updatedText").textContent = "更新于 0 秒前";
+    }
+  });
+
+  const liveSwitch = document.getElementById("liveSwitch");
+  liveSwitch.addEventListener("click", function () {
+    state.live = !state.live;
+    liveSwitch.setAttribute("aria-checked", String(state.live));
+    if (state.live) startLive(); else stopLive();
+  });
+
+  let secondsAgo = 3;
+  function startLive() {
+    stopLive();
+    state.timer = setInterval(function () {
+      if (state.paused) return;
+      secondsAgo = 0;
+      document.getElementById("updatedText").textContent = "更新于刚刚";
+      const key = state.metric + "|" + state.window;
+      const series = state.data[key];
+      if (series) {
+        series.forEach(function (arr, si) {
+          const last = arr[arr.length - 1];
+          const delta = (Math.random() - 0.5) * (si === 0 ? 6 : 3);
+          arr.push(Math.max(0, Math.min(99, last + delta)));
+          arr.shift();
+        });
+      }
+      render();
+    }, 1600);
+  }
+  function stopLive() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  }
+
+  setInterval(function () {
+    if (!state.live || state.paused) return;
+    secondsAgo += 1;
+    if (secondsAgo > 0 && secondsAgo < 60) {
+      document.getElementById("updatedText").textContent = "更新于 " + secondsAgo + " 秒前";
+    }
+  }, 1000);
+
+  /* 状态演示 */
+  const trendCard = document.getElementById("trendCard");
+  const errBanner = document.getElementById("errBanner");
+  function setState(s) {
+    trendCard.setAttribute("data-state", s === "banner" ? "normal" : s);
+    errBanner.classList.toggle("show", s === "banner");
+    document.querySelectorAll("[data-state-btn]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-state-btn") === s));
+    });
+  }
+  document.querySelectorAll("[data-state-btn]").forEach(function (b) {
+    b.addEventListener("click", function () { setState(b.getAttribute("data-state-btn")); });
+  });
+
+  /* 主题切换 */
+  function setTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    document.getElementById("themeDark").setAttribute("aria-pressed", String(theme === "dark"));
+    document.getElementById("themeLight").setAttribute("aria-pressed", String(theme === "light"));
+    render();
+  }
+  document.getElementById("themeDark").addEventListener("click", function () { setTheme("dark"); });
+  document.getElementById("themeLight").addEventListener("click", function () { setTheme("light"); });
+
+  /* 初始化 */
+  renderProcs();
+  render();
+  startLive();
+})();
+</script>
+</body>
+</html>

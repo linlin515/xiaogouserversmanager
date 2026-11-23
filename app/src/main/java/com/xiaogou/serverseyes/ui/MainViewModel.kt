@@ -8,12 +8,15 @@ import com.xiaogou.serverseyes.core.backup.BackupImportStrategy
 import com.xiaogou.serverseyes.core.backup.BackupPreview
 import com.xiaogou.serverseyes.core.model.AlertEvent
 import com.xiaogou.serverseyes.core.model.AlertRule
+import com.xiaogou.serverseyes.core.model.HistoryWindow
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.MetricPoint
 import com.xiaogou.serverseyes.core.model.ServerConfig
+import com.xiaogou.serverseyes.core.model.ServerSnapshot
 import com.xiaogou.serverseyes.core.model.ServerSortOption
 import com.xiaogou.serverseyes.core.model.ServerStatus
 import com.xiaogou.serverseyes.core.model.ThemePreference
+import com.xiaogou.serverseyes.core.model.TrendMetric
 import com.xiaogou.serverseyes.core.model.WorkloadAction
 import com.xiaogou.serverseyes.core.parser.ErrorMapper
 import com.xiaogou.serverseyes.data.local.AppSettings
@@ -35,9 +38,41 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+enum class DetailTab(val label: String) {
+    OVERVIEW("资源概览"),
+    WORKLOADS("容器与服务"),
+    OPS("日志与诊断")
+}
+
+enum class ContainerStateFilter(val label: String) {
+    ALL("全部"),
+    RUNNING("运行中"),
+    STOPPED("已停止")
+}
+
+enum class ServiceStateFilter(val label: String) {
+    ALL("全部"),
+    HEALTHY("运行中"),
+    UNHEALTHY("异常")
+}
+
+enum class ProcessSort(val label: String) {
+    CPU("CPU ↓"),
+    MEMORY("内存 ↓")
+}
+
 data class DetailOpsState(
     val historyPoints: List<MetricPoint> = emptyList(),
-    val historyMinutes: Int = 60,
+    val historyWindow: HistoryWindow = HistoryWindow.LAST_1H,
+    val historyMetric: TrendMetric = TrendMetric.CPU_MEM,
+    val isLiveMode: Boolean = true,
+    val isLoadingHistory: Boolean = false,
+    val historyError: String? = null,
+    val detailTab: DetailTab = DetailTab.OVERVIEW,
+    val processSort: ProcessSort = ProcessSort.CPU,
+    val serviceFilter: ServiceStateFilter = ServiceStateFilter.ALL,
+    val workloadSearch: String = "",
+    val containerFilter: ContainerStateFilter = ContainerStateFilter.ALL,
     val logServerId: String = "",
     val logTargetType: LogTargetType = LogTargetType.SYSTEM_JOURNAL,
     val logTargetName: String = "",
@@ -52,6 +87,8 @@ data class DetailOpsState(
     val isRunningDiag: Boolean = false,
     val isActionPending: Boolean = false
 )
+
+private const val MAX_DETAIL_POINTS = 400
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as ServersEyesApplication
@@ -95,6 +132,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val snackbarEvents = _snackbarEvents.asSharedFlow()
 
     private var pollingJob: Job? = null
+    private var liveJob: Job? = null
+    private var lastLiveTimestamp = 0L
+    private var historyRequestToken = 0
 
     init {
         viewModelScope.launch {
@@ -104,6 +144,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _selectedServerId.value = list.first().config.id
             }
             _isInitialLoading.value = false
+            _selectedServerId.value?.let { id ->
+                startLiveCollector(id)
+                loadHistoryInternal(id, _detailOps.value.historyWindow)
+            }
             startPolling()
         }
     }
@@ -114,11 +158,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (!ForegroundMonitorService.isServiceRunning.value) {
                     performRefreshCycle()
-                } else {
-                    _selectedServerId.value?.let { id ->
-                        loadHistoryInternal(id, _detailOps.value.historyMinutes)
-                    }
                 }
+                // 实时曲线由 observeServers 增量驱动；关闭实时后窗口固定，不随轮询滑移。
                 val intervalSec = settingsStore.settingsFlow.first().pollIntervalSeconds
                 delay(intervalSec * 1000L)
             }
@@ -133,6 +174,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshNow() {
         viewModelScope.launch {
             performRefreshCycle(force = true)
+            _selectedServerId.value?.let { id ->
+                loadHistoryInternal(id, _detailOps.value.historyWindow)
+            }
         }
     }
 
@@ -142,9 +186,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             repo.refreshAllServers(force = force)
             _lastRefreshMs.value = System.currentTimeMillis()
-            _selectedServerId.value?.let { id ->
-                loadHistoryInternal(id, _detailOps.value.historyMinutes)
-            }
         } finally {
             _isRefreshing.value = false
         }
@@ -160,24 +201,136 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectServer(serverId: String) {
         _selectedServerId.value = serverId
-        _detailOps.value = DetailOpsState()
+        // 保留窗口、指标、实时开关与 Tab 选择，只清理与上一台节点绑定的数据。
+        _detailOps.value = _detailOps.value.copy(
+            historyPoints = emptyList(),
+            isLoadingHistory = true,
+            historyError = null,
+            logServerId = "",
+            logTitle = "",
+            logLines = emptyList(),
+            logError = null,
+            isLogsOpen = false,
+            diagOutput = "点击上方预设诊断项或输入只读命令开始排查",
+            diagHistory = emptyList(),
+            isRunningDiag = false
+        )
+        lastLiveTimestamp = 0L
+        startLiveCollector(serverId)
         viewModelScope.launch {
-            loadHistoryInternal(serverId, _detailOps.value.historyMinutes)
+            loadHistoryInternal(serverId, _detailOps.value.historyWindow)
         }
     }
 
     fun changeHistoryRange(serverId: String, minutes: Int) {
-        _detailOps.value = _detailOps.value.copy(historyMinutes = minutes)
+        val window = HistoryWindow.fromMinutes(minutes)
+        if (_detailOps.value.historyWindow == window) return
+        _detailOps.value = _detailOps.value.copy(historyWindow = window)
         viewModelScope.launch {
-            loadHistoryInternal(serverId, minutes)
+            loadHistoryInternal(serverId, window)
         }
     }
 
-    private suspend fun loadHistoryInternal(serverId: String, minutes: Int) {
-        val cfg = repo.getServerById(serverId) ?: return
-        val pts = repo.fetchHistoryWithAgentFallback(cfg, minutes)
-        _detailOps.value = _detailOps.value.copy(historyPoints = pts)
+    fun setHistoryMetric(metric: TrendMetric) {
+        if (_detailOps.value.historyMetric == metric) return
+        _detailOps.value = _detailOps.value.copy(historyMetric = metric)
     }
+
+    fun setLiveMode(enabled: Boolean) {
+        if (_detailOps.value.isLiveMode == enabled) return
+        _detailOps.value = _detailOps.value.copy(isLiveMode = enabled)
+        if (enabled) {
+            _selectedServerId.value?.let { id ->
+                viewModelScope.launch { loadHistoryInternal(id, _detailOps.value.historyWindow) }
+            }
+        }
+    }
+
+    fun setDetailTab(tab: DetailTab) {
+        _detailOps.value = _detailOps.value.copy(detailTab = tab)
+    }
+
+    fun setProcessSort(sort: ProcessSort) {
+        _detailOps.value = _detailOps.value.copy(processSort = sort)
+    }
+
+    fun setServiceFilter(filter: ServiceStateFilter) {
+        _detailOps.value = _detailOps.value.copy(serviceFilter = filter)
+    }
+
+    fun setWorkloadSearch(query: String) {
+        _detailOps.value = _detailOps.value.copy(workloadSearch = query)
+    }
+
+    fun setContainerFilter(filter: ContainerStateFilter) {
+        _detailOps.value = _detailOps.value.copy(containerFilter = filter)
+    }
+
+    private suspend fun loadHistoryInternal(serverId: String, window: HistoryWindow) {
+        val token = ++historyRequestToken
+        _detailOps.value = _detailOps.value.copy(isLoadingHistory = true, historyError = null)
+        try {
+            val cfg = repo.getServerById(serverId) ?: return
+            val pts = repo.fetchHistoryWithAgentFallback(cfg, window.minutes)
+            if (token != historyRequestToken || _selectedServerId.value != serverId) return
+            lastLiveTimestamp = maxOf(lastLiveTimestamp, pts.lastOrNull()?.timestampMs ?: 0L)
+            _detailOps.value = _detailOps.value.copy(
+                historyPoints = pts,
+                isLoadingHistory = false,
+                historyError = null
+            )
+        } catch (e: Exception) {
+            if (token != historyRequestToken) return
+            _detailOps.value = _detailOps.value.copy(
+                isLoadingHistory = false,
+                historyError = "历史数据加载失败，请稍后重试"
+            )
+        }
+    }
+
+    /**
+     * 实时模式：订阅节点快照，只追加比缓冲区更新的采样点。
+     * 不在这里做全量重查，避免每 5 秒重建整条曲线。
+     */
+    private fun startLiveCollector(serverId: String) {
+        liveJob?.cancel()
+        liveJob = viewModelScope.launch {
+            repo.observeServers().collect { list ->
+                if (_selectedServerId.value != serverId) return@collect
+                val ops = _detailOps.value
+                if (!ops.isLiveMode) return@collect
+                val snapshot = list.firstOrNull { it.config.id == serverId }?.snapshot ?: return@collect
+                if (snapshot.timestampMs <= lastLiveTimestamp) return@collect
+                lastLiveTimestamp = snapshot.timestampMs
+
+                val point = snapshot.toMetricPoint()
+                val cutoff = System.currentTimeMillis() - ops.historyWindow.minutes * 60_000L
+                val bucket = ops.historyWindow.bucketMs
+                val merged = (ops.historyPoints
+                    .filterNot { it.timestampMs / bucket == point.timestampMs / bucket } + point)
+                    .filter { it.timestampMs >= cutoff }
+                    .takeLast(MAX_DETAIL_POINTS)
+                _detailOps.value = _detailOps.value.copy(historyPoints = merged)
+            }
+        }
+    }
+
+    private fun ServerSnapshot.toMetricPoint(): MetricPoint = MetricPoint(
+        timestampMs = timestampMs,
+        cpuPercent = cpuPercent,
+        memPercent = memPercent,
+        netRxBytesPerSec = netRxBytesPerSec,
+        netTxBytesPerSec = netTxBytesPerSec,
+        load1 = load1,
+        diskMaxPercent = maxDiskPercent,
+        cpuTempCelsius = cpuTempCelsius,
+        diskReadBytesPerSec = diskReadBytesPerSec,
+        diskWriteBytesPerSec = diskWriteBytesPerSec,
+        swapUsedBytes = swapUsedBytes,
+        swapTotalBytes = swapTotalBytes,
+        load5 = load5,
+        load15 = load15
+    )
 
     fun openLogs(
         serverId: String,
@@ -311,7 +464,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repo.deleteServer(serverId)
             if (_selectedServerId.value == serverId) {
-                _selectedServerId.value = servers.value.firstOrNull { it.config.id != serverId }?.config?.id
+                val nextId = servers.value.firstOrNull { it.config.id != serverId }?.config?.id
+                _selectedServerId.value = nextId
+                _detailOps.value = _detailOps.value.copy(historyPoints = emptyList())
+                lastLiveTimestamp = 0L
+                if (nextId != null) {
+                    startLiveCollector(nextId)
+                    loadHistoryInternal(nextId, _detailOps.value.historyWindow)
+                } else {
+                    liveJob?.cancel()
+                }
             }
             onDeleted()
             _snackbarEvents.emit("已删除服务器")
@@ -367,7 +529,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repo.batchDeleteServers(serverIds)
             if (_selectedServerId.value in serverIds) {
-                _selectedServerId.value = servers.value.firstOrNull { it.config.id !in serverIds }?.config?.id
+                val nextId = servers.value.firstOrNull { it.config.id !in serverIds }?.config?.id
+                _selectedServerId.value = nextId
+                _detailOps.value = _detailOps.value.copy(historyPoints = emptyList())
+                lastLiveTimestamp = 0L
+                if (nextId != null) {
+                    startLiveCollector(nextId)
+                    loadHistoryInternal(nextId, _detailOps.value.historyWindow)
+                } else {
+                    liveJob?.cancel()
+                }
             }
             _snackbarEvents.emit("已删除选中的 ${serverIds.size} 台服务器")
         }

@@ -10,6 +10,7 @@ import com.xiaogou.serverseyes.core.model.AlertSeverity
 import com.xiaogou.serverseyes.core.model.CollectionMode
 import com.xiaogou.serverseyes.core.model.CpuJiffies
 import com.xiaogou.serverseyes.core.model.DiskIoSectors
+import com.xiaogou.serverseyes.core.model.HistoryWindow
 import com.xiaogou.serverseyes.core.model.LogTargetType
 import com.xiaogou.serverseyes.core.model.MetricPoint
 import com.xiaogou.serverseyes.core.model.MetricSource
@@ -31,6 +32,7 @@ import com.xiaogou.serverseyes.data.local.AlertEventEntity
 import com.xiaogou.serverseyes.data.local.AlertRuleDao
 import com.xiaogou.serverseyes.data.local.AlertRuleEntity
 import com.xiaogou.serverseyes.data.local.AppDatabase
+import com.xiaogou.serverseyes.data.local.MetricBucketRow
 import com.xiaogou.serverseyes.data.local.MetricSampleDao
 import com.xiaogou.serverseyes.data.local.MetricSampleEntity
 import com.xiaogou.serverseyes.data.local.ServerDao
@@ -50,6 +52,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+/** 趋势图单序列最多保留的点数，超出时丢弃最早的数据。 */
+private const val MAX_TREND_POINTS = 400
 
 data class ServerRuntimeData(
     val snapshot: ServerSnapshot? = null,
@@ -150,22 +155,6 @@ class ServerRepository(
 
     fun observeAlertEvents(): Flow<List<AlertEvent>> =
         alertEventDao.observeRecent().map { list -> list.map { it.toDomain() } }
-
-    fun observeLocalHistory(serverId: String, minutes: Int = 60): Flow<List<MetricPoint>> {
-        val since = System.currentTimeMillis() - minutes * 60_000L
-        return sampleDao.observeRecent(serverId, since).map { list ->
-            list.map {
-                MetricPoint(
-                    timestampMs = it.timestampMs,
-                    cpuPercent = it.cpuPercent,
-                    memPercent = it.memPercent,
-                    netRxBytesPerSec = it.netRxBytesPerSec,
-                    netTxBytesPerSec = it.netTxBytesPerSec,
-                    load1 = it.load1
-                )
-            }
-        }
-    }
 
     suspend fun getServerById(id: String): ServerConfig? =
         serverDao.getById(id)?.toDomain()
@@ -401,7 +390,14 @@ class ServerRepository(
                         netRxBytesPerSec = snapshot.netRxBytesPerSec,
                         netTxBytesPerSec = snapshot.netTxBytesPerSec,
                         load1 = snapshot.load1,
-                        sourceUsed = snapshot.sourceUsed.name
+                        sourceUsed = snapshot.sourceUsed.name,
+                        cpuTempCelsius = snapshot.cpuTempCelsius,
+                        diskReadBytesPerSec = snapshot.diskReadBytesPerSec,
+                        diskWriteBytesPerSec = snapshot.diskWriteBytesPerSec,
+                        swapUsedBytes = snapshot.swapUsedBytes,
+                        swapTotalBytes = snapshot.swapTotalBytes,
+                        load5 = snapshot.load5,
+                        load15 = snapshot.load15
                     )
                 )
                 serverDao.updateRuntimeMeta(
@@ -603,25 +599,71 @@ class ServerRepository(
         config: ServerConfig,
         minutes: Int = 60
     ): List<MetricPoint> {
+        val window = HistoryWindow.fromMinutes(minutes)
         if (config.collectionMode != CollectionMode.SSH_ONLY && config.agentUrl.isNotBlank()) {
             val remote = agentClient.fetchHistory(config.agentUrl, config.agentToken, minutes)
             if (remote.isSuccess) {
                 val points = remote.getOrNull().orEmpty()
-                if (points.isNotEmpty()) return points
+                if (points.isNotEmpty()) {
+                    // Agent 端按原始间隔存储（默认 10s），长窗口同样需要聚合后再交给图表。
+                    return downsample(points, window.bucketMs).takeLast(MAX_TREND_POINTS)
+                }
             }
         }
         val since = System.currentTimeMillis() - minutes * 60_000L
-        return sampleDao.observeRecent(config.id, since).first().map {
+        return sampleDao.getRangeBucketed(config.id, since, window.bucketMs)
+            .map { it.toMetricPoint() }
+            .takeLast(MAX_TREND_POINTS)
+    }
+
+    /**
+     * 按时间桶对原始点取均值。仅用于 Agent 返回的原始序列；
+     * 本地历史由 SQL 聚合完成，避免把整段数据读进内存。
+     */
+    private fun downsample(points: List<MetricPoint>, bucketMs: Long): List<MetricPoint> {
+        if (points.isEmpty() || bucketMs <= 0L) return points
+        val buckets = LinkedHashMap<Long, MutableList<MetricPoint>>()
+        points.forEach { point ->
+            val key = (point.timestampMs / bucketMs) * bucketMs
+            buckets.getOrPut(key) { mutableListOf() }.add(point)
+        }
+        return buckets.map { (bucketStart, group) ->
             MetricPoint(
-                timestampMs = it.timestampMs,
-                cpuPercent = it.cpuPercent,
-                memPercent = it.memPercent,
-                netRxBytesPerSec = it.netRxBytesPerSec,
-                netTxBytesPerSec = it.netTxBytesPerSec,
-                load1 = it.load1
+                timestampMs = bucketStart,
+                cpuPercent = group.map { it.cpuPercent }.average(),
+                memPercent = group.map { it.memPercent }.average(),
+                netRxBytesPerSec = group.map { it.netRxBytesPerSec }.average().toLong(),
+                netTxBytesPerSec = group.map { it.netTxBytesPerSec }.average().toLong(),
+                load1 = group.map { it.load1 }.average(),
+                diskMaxPercent = group.map { it.diskMaxPercent }.average(),
+                cpuTempCelsius = group.mapNotNull { it.cpuTempCelsius }
+                    .takeIf { it.isNotEmpty() }?.average(),
+                diskReadBytesPerSec = group.map { it.diskReadBytesPerSec }.average().toLong(),
+                diskWriteBytesPerSec = group.map { it.diskWriteBytesPerSec }.average().toLong(),
+                swapUsedBytes = group.map { it.swapUsedBytes }.average().toLong(),
+                swapTotalBytes = group.map { it.swapTotalBytes }.average().toLong(),
+                load5 = group.map { it.load5 }.average(),
+                load15 = group.map { it.load15 }.average()
             )
         }
     }
+
+    private fun MetricBucketRow.toMetricPoint(): MetricPoint = MetricPoint(
+        timestampMs = bucketStartMs,
+        cpuPercent = avgCpuPercent,
+        memPercent = avgMemPercent,
+        netRxBytesPerSec = avgNetRxBytesPerSec.toLong(),
+        netTxBytesPerSec = avgNetTxBytesPerSec.toLong(),
+        load1 = avgLoad1,
+        diskMaxPercent = avgDiskPercent,
+        cpuTempCelsius = avgCpuTempCelsius,
+        diskReadBytesPerSec = avgDiskReadBytesPerSec.toLong(),
+        diskWriteBytesPerSec = avgDiskWriteBytesPerSec.toLong(),
+        swapUsedBytes = avgSwapUsedBytes.toLong(),
+        swapTotalBytes = avgSwapTotalBytes.toLong(),
+        load5 = avgLoad5,
+        load15 = avgLoad15
+    )
 
     suspend fun fetchLogs(
         config: ServerConfig,

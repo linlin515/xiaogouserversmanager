@@ -51,7 +51,14 @@ data class MetricSampleEntity(
     val netRxBytesPerSec: Long,
     val netTxBytesPerSec: Long,
     val load1: Double,
-    val sourceUsed: String
+    val sourceUsed: String,
+    val cpuTempCelsius: Double? = null,
+    val diskReadBytesPerSec: Long = 0L,
+    val diskWriteBytesPerSec: Long = 0L,
+    val swapUsedBytes: Long = 0L,
+    val swapTotalBytes: Long = 0L,
+    val load5: Double = 0.0,
+    val load15: Double = 0.0
 )
 
 @Entity(tableName = "alert_rules")

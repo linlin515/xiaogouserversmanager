@@ -15,7 +15,7 @@ import com.xiaogou.serverseyes.core.model.AlertMetricType
         AlertRuleEntity::class,
         AlertEventEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -55,13 +55,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN cpuTempCelsius REAL")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN diskReadBytesPerSec INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN diskWriteBytesPerSec INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN swapUsedBytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN swapTotalBytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN load5 REAL NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE metric_samples ADD COLUMN load15 REAL NOT NULL DEFAULT 0")
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 "server_eyes.db"
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
         }
 
