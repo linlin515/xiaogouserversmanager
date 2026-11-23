@@ -1,3 +1,4 @@
+import com.android.build.api.dsl.ApplicationBuildType
 import java.io.File
 import java.util.Locale
 
@@ -130,6 +131,20 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+// 产物命名：小狗服务器-版本名-版本号.apk
+// AGP 8.x 需要通过 VariantOutputImpl 内部类型设置 outputFileName（官方推荐做法）。
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            val versionName = output.versionName.get()
+            val versionCode = output.versionCode.get()
+            (output as? com.android.build.api.variant.impl.VariantOutputImpl)
+                ?.outputFileName
+                ?.set("小狗服务器-$versionName-$versionCode.apk")
+        }
     }
 }
 
