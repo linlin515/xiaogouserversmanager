@@ -27,6 +27,7 @@ import com.xiaogou.serverseyes.service.ForegroundMonitorService
 import com.xiaogou.serverseyes.service.MonitoringWorker
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -128,8 +129,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _detailOps = MutableStateFlow(DetailOpsState())
     val detailOps: StateFlow<DetailOpsState> = _detailOps.asStateFlow()
 
-    private val _snackbarEvents = MutableSharedFlow<String>()
+    // extraBufferCapacity 避免连续 emit 时发射方挂起；去重防止同一文案短时间内连环弹出。
+    private val _snackbarEvents = MutableSharedFlow<String>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     val snackbarEvents = _snackbarEvents.asSharedFlow()
+
+    private var lastSnackbarMessage: String? = null
+    private var lastSnackbarAtMs = 0L
+
+    fun emitSnackbar(message: String) {
+        val now = System.currentTimeMillis()
+        if (message == lastSnackbarMessage && now - lastSnackbarAtMs < 1500L) return
+        lastSnackbarMessage = message
+        lastSnackbarAtMs = now
+        _snackbarEvents.tryEmit(message)
+    }
 
     private var pollingJob: Job? = null
     private var liveJob: Job? = null
@@ -404,10 +420,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val cfg = repo.getServerById(serverId)
             if (cfg != null) {
                 repo.performWorkloadAction(cfg, targetType, targetName, action).fold(
-                    onSuccess = { msg -> _snackbarEvents.emit(msg) },
+                    onSuccess = { msg -> emitSnackbar(msg) },
                     onFailure = { e ->
                         val err = ErrorMapper.toUserFacingError(e)
-                        _snackbarEvents.emit("${err.title}：${err.message}")
+                        emitSnackbar("${err.title}：${err.message}")
                     }
                 )
             }
@@ -476,35 +492,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             onDeleted()
-            _snackbarEvents.emit("已删除服务器")
+            emitSnackbar("已删除服务器")
         }
     }
 
     fun saveAlertRule(rule: AlertRule) {
         viewModelScope.launch {
             repo.saveAlertRule(rule)
-            _snackbarEvents.emit("告警阈值已更新")
+            emitSnackbar("告警阈值已更新")
         }
     }
 
     fun deleteAlertRule(ruleId: String) {
         viewModelScope.launch {
             repo.deleteAlertRule(ruleId)
-            _snackbarEvents.emit("已恢复全局默认阈值")
+            emitSnackbar("已恢复全局默认阈值")
         }
     }
 
     fun setPinned(serverId: String, pinned: Boolean) {
         viewModelScope.launch {
             repo.setPinned(serverId, pinned)
-            _snackbarEvents.emit(if (pinned) "已置顶该服务器" else "已取消置顶")
+            emitSnackbar(if (pinned) "已置顶该服务器" else "已取消置顶")
         }
     }
 
     fun setEnabled(serverId: String, enabled: Boolean) {
         viewModelScope.launch {
             repo.setEnabled(serverId, enabled)
-            _snackbarEvents.emit(if (enabled) "已恢复轮询采集" else "已暂停该节点采集")
+            emitSnackbar(if (enabled) "已恢复轮询采集" else "已暂停该节点采集")
         }
     }
 
@@ -512,7 +528,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (serverIds.isEmpty()) return
         viewModelScope.launch {
             repo.batchSetPinned(serverIds, pinned)
-            _snackbarEvents.emit(if (pinned) "已批量置顶 ${serverIds.size} 台服务器" else "已取消置顶 ${serverIds.size} 台服务器")
+            emitSnackbar(if (pinned) "已批量置顶 ${serverIds.size} 台服务器" else "已取消置顶 ${serverIds.size} 台服务器")
         }
     }
 
@@ -520,7 +536,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (serverIds.isEmpty()) return
         viewModelScope.launch {
             repo.batchSetEnabled(serverIds, enabled)
-            _snackbarEvents.emit(if (enabled) "已恢复 ${serverIds.size} 台节点采集" else "已暂停 ${serverIds.size} 台节点采集")
+            emitSnackbar(if (enabled) "已恢复 ${serverIds.size} 台节点采集" else "已暂停 ${serverIds.size} 台节点采集")
         }
     }
 
@@ -540,7 +556,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     liveJob?.cancel()
                 }
             }
-            _snackbarEvents.emit("已删除选中的 ${serverIds.size} 台服务器")
+            emitSnackbar("已删除选中的 ${serverIds.size} 台服务器")
         }
     }
 
@@ -551,7 +567,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun trustFingerprint(serverId: String, fingerprint: String) {
         viewModelScope.launch {
             repo.trustFingerprint(serverId, fingerprint)
-            _snackbarEvents.emit("已更新信任的主机指纹")
+            emitSnackbar("已更新信任的主机指纹")
             performRefreshCycle()
         }
     }
@@ -593,14 +609,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun acknowledgeAllAlerts() {
         viewModelScope.launch {
             repo.acknowledgeAllAlerts()
-            _snackbarEvents.emit("已将全部告警标记为已读")
+            emitSnackbar("已将全部告警标记为已读")
         }
     }
 
     fun clearAlerts() {
         viewModelScope.launch {
             repo.clearAlerts()
-            _snackbarEvents.emit("已清空告警历史")
+            emitSnackbar("已清空告警历史")
         }
     }
 
@@ -659,7 +675,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearLocalCache() {
         viewModelScope.launch {
             repo.clearLocalMetricsCache()
-            _snackbarEvents.emit("已清理本地历史缓存")
+            emitSnackbar("已清理本地历史缓存")
         }
     }
 

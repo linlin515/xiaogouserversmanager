@@ -227,7 +227,12 @@ fun AlertsScreen(
                             onUpdateRule(mutator(base))
                         }
 
-                        if (rule != null) {
+                        // 滑块拖动过程中只更新本地预览值，松手后才提交，
+                        // 否则每个拖动增量都会触发一次持久化与 snackbar。
+                        var pendingEdit by remember(metricType, selectedScopeId) { mutableStateOf<AlertRule?>(null) }
+                        val displayRule = pendingEdit ?: rule
+
+                        if (displayRule != null) {
                             Column(modifier = Modifier.padding(vertical = 6.dp)) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -251,18 +256,21 @@ fun AlertsScreen(
                                     ) {
                                         val unit = if (isOffline) "次" else "%"
                                         Text(
-                                            text = "警告 ${rule.warningThreshold.roundToInt()}$unit / 严重 ${rule.criticalThreshold.roundToInt()}$unit",
+                                            text = "警告 ${displayRule.warningThreshold.roundToInt()}$unit / 严重 ${displayRule.criticalThreshold.roundToInt()}$unit",
                                             style = AppTheme.typography.bodySmall.tabular(),
                                             color = colors.textSecondary
                                         )
                                         Switch(
-                                            checked = rule.enabled,
-                                            onCheckedChange = { enabled -> commitRule { it.copy(enabled = enabled) } }
+                                            checked = displayRule.enabled,
+                                            onCheckedChange = { enabled ->
+                                                pendingEdit = null
+                                                commitRule { it.copy(enabled = enabled) }
+                                            }
                                         )
                                     }
                                 }
 
-                                if (rule.enabled) {
+                                if (displayRule.enabled) {
                                     if (!isOffline) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -270,14 +278,18 @@ fun AlertsScreen(
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text("警告阈值 (40% ~ 95%)", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
-                                            Text("${rule.warningThreshold.roundToInt()}%", style = AppTheme.typography.labelSmall.tabular(), color = colors.warning)
+                                            Text("${displayRule.warningThreshold.roundToInt()}%", style = AppTheme.typography.labelSmall.tabular(), color = colors.warning)
                                         }
                                         Slider(
-                                            value = rule.warningThreshold.toFloat().coerceIn(40f, 95f),
+                                            value = displayRule.warningThreshold.toFloat().coerceIn(40f, 95f),
                                             onValueChange = { newWarn ->
                                                 val w = newWarn.roundToInt().coerceIn(40, 95).toDouble()
-                                                val c = rule.criticalThreshold.coerceAtLeast(w + 1.0).coerceAtMost(99.0)
-                                                commitRule { it.copy(warningThreshold = w, criticalThreshold = c) }
+                                                val c = displayRule.criticalThreshold.coerceAtLeast(w + 1.0).coerceAtMost(99.0)
+                                                pendingEdit = displayRule.copy(warningThreshold = w, criticalThreshold = c)
+                                            },
+                                            onValueChangeFinished = {
+                                                pendingEdit?.let { committed -> commitRule { committed } }
+                                                pendingEdit = null
                                             },
                                             valueRange = 40f..95f,
                                             colors = SliderDefaults.colors(thumbColor = colors.warning, activeTrackColor = colors.warning)
@@ -289,14 +301,18 @@ fun AlertsScreen(
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text("严重阈值 (50% ~ 99%)", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
-                                            Text("${rule.criticalThreshold.roundToInt()}%", style = AppTheme.typography.labelSmall.tabular(), color = colors.error)
+                                            Text("${displayRule.criticalThreshold.roundToInt()}%", style = AppTheme.typography.labelSmall.tabular(), color = colors.error)
                                         }
                                         Slider(
-                                            value = rule.criticalThreshold.toFloat().coerceIn(50f, 99f),
+                                            value = displayRule.criticalThreshold.toFloat().coerceIn(50f, 99f),
                                             onValueChange = { newCrit ->
                                                 val c = newCrit.roundToInt().coerceIn(50, 99).toDouble()
-                                                val w = rule.warningThreshold.coerceAtMost(c - 1.0).coerceAtLeast(40.0)
-                                                commitRule { it.copy(warningThreshold = w, criticalThreshold = c) }
+                                                val w = displayRule.warningThreshold.coerceAtMost(c - 1.0).coerceAtLeast(40.0)
+                                                pendingEdit = displayRule.copy(warningThreshold = w, criticalThreshold = c)
+                                            },
+                                            onValueChangeFinished = {
+                                                pendingEdit?.let { committed -> commitRule { committed } }
+                                                pendingEdit = null
                                             },
                                             valueRange = 50f..99f,
                                             colors = SliderDefaults.colors(thumbColor = colors.error, activeTrackColor = colors.error)
@@ -314,7 +330,7 @@ fun AlertsScreen(
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                                             ) {
                                                 listOf(1, 2, 3, 5, 10).forEach { cnt ->
-                                                    val active = rule.warningThreshold.toInt() == cnt
+                                                    val active = displayRule.warningThreshold.toInt() == cnt
                                                     Surface(
                                                         onClick = {
                                                             commitRule {
@@ -347,13 +363,17 @@ fun AlertsScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text("告警冷却时间", style = AppTheme.typography.bodySmall, color = colors.textSecondary)
-                                        Text("${rule.cooldownMinutes}分钟", style = AppTheme.typography.labelSmall.tabular(), color = colors.textPrimary)
+                                        Text("${displayRule.cooldownMinutes}分钟", style = AppTheme.typography.labelSmall.tabular(), color = colors.textPrimary)
                                     }
                                     Slider(
-                                        value = rule.cooldownMinutes.toFloat(),
+                                        value = displayRule.cooldownMinutes.toFloat(),
                                         onValueChange = { mins ->
                                             val m = mins.roundToInt().coerceIn(1, 60)
-                                            commitRule { it.copy(cooldownMinutes = m) }
+                                            pendingEdit = displayRule.copy(cooldownMinutes = m)
+                                        },
+                                        onValueChangeFinished = {
+                                            pendingEdit?.let { committed -> commitRule { committed } }
+                                            pendingEdit = null
                                         },
                                         valueRange = 1f..60f,
                                         colors = SliderDefaults.colors(thumbColor = colors.actionPrimary, activeTrackColor = colors.actionPrimary)
@@ -361,7 +381,10 @@ fun AlertsScreen(
 
                                     if (isOverridden) {
                                         TextButton(
-                                            onClick = { onDeleteRule(rule.id) },
+                                            onClick = {
+                                                pendingEdit = null
+                                                displayRule?.let { onDeleteRule(it.id) }
+                                            },
                                             modifier = Modifier.align(Alignment.End)
                                         ) {
                                             Text("恢复为全局默认", color = colors.error, style = AppTheme.typography.bodySmall)
